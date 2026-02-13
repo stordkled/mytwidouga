@@ -9,9 +9,8 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-# We use npm ci for reliable builds
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-RUN npm ci
+RUN npm install
 
 # Copy app source
 COPY . .
