@@ -10,6 +10,7 @@ COPY package*.json ./
 
 # Install dependencies
 # We use npm ci for reliable builds
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 RUN npm ci
 
 # Copy app source
