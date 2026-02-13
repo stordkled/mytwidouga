@@ -1,0 +1,12 @@
+{
+    "name": "rinnri-shorts",
+    "private": true,
+    "version": "1.0.0",
+    "scripts": {
+        "start": "node server.js",
+        "dev": "node server.js"
+    },
+    "dependencies": {
+        "puppeteer": "^21.11.0"
+    }
+}

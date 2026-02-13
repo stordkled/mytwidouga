@@ -1,0 +1,709 @@
+/* ============================================
+   TWIVIDEO Shorts - Design System
+   ============================================ */
+
+:root {
+    --bg-primary: #000000;
+    --bg-secondary: #0a0a0a;
+    --bg-card: #111111;
+    --bg-glass: rgba(255, 255, 255, 0.06);
+    --bg-glass-strong: rgba(255, 255, 255, 0.12);
+
+    --text-primary: #ffffff;
+    --text-secondary: rgba(255, 255, 255, 0.7);
+    --text-tertiary: rgba(255, 255, 255, 0.45);
+
+    --accent-primary: #ff2d55;
+    --accent-secondary: #ff6b8a;
+    --accent-gradient: linear-gradient(135deg, #ff2d55 0%, #ff6b8a 50%, #ff9f43 100%);
+    --accent-glow: 0 0 20px rgba(255, 45, 85, 0.4);
+
+    --gold: #ffd700;
+    --silver: #c0c0c0;
+    --bronze: #cd7f32;
+
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --radius-xl: 24px;
+    --radius-full: 9999px;
+
+    --font-main: 'Inter', 'Noto Sans JP', -apple-system, BlinkMacSystemFont, sans-serif;
+
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --nav-height: 64px;
+}
+
+/* ============================================
+   Reset & Base
+   ============================================ */
+*,
+*::before,
+*::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html {
+    font-size: 16px;
+    -webkit-text-size-adjust: 100%;
+    overflow: hidden;
+}
+
+body {
+    font-family: var(--font-main);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    overflow: hidden;
+    height: 100dvh;
+    width: 100vw;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    touch-action: pan-y;
+}
+
+#app {
+    height: 100dvh;
+    width: 100%;
+    position: relative;
+    overflow: hidden;
+}
+
+/* ============================================
+   Loading Screen
+   ============================================ */
+.loading-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: var(--bg-primary);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    transition: opacity 0.5s ease, visibility 0.5s ease;
+}
+
+.loading-screen.hidden {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.loading-spinner {
+    position: relative;
+    width: 60px;
+    height: 60px;
+}
+
+.spinner-ring {
+    position: absolute;
+    inset: 0;
+    border: 3px solid transparent;
+    border-radius: 50%;
+}
+
+.spinner-ring:nth-child(1) {
+    border-top-color: var(--accent-primary);
+    animation: spin 1s linear infinite;
+}
+
+.spinner-ring:nth-child(2) {
+    inset: 6px;
+    border-right-color: var(--accent-secondary);
+    animation: spin 1.5s linear infinite reverse;
+}
+
+.spinner-ring:nth-child(3) {
+    inset: 12px;
+    border-bottom-color: #ff9f43;
+    animation: spin 2s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.loading-text {
+    font-size: 14px;
+    color: var(--text-secondary);
+    letter-spacing: 0.05em;
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        opacity: 0.5;
+    }
+
+    50% {
+        opacity: 1;
+    }
+}
+
+/* ============================================
+   Video Feed (Snap Scroll Container)
+   ============================================ */
+.video-feed {
+    height: 100dvh;
+    width: 100%;
+    overflow-y: scroll;
+    scroll-snap-type: y mandatory;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+}
+
+.video-feed::-webkit-scrollbar {
+    display: none;
+}
+
+/* ============================================
+   Video Card (Each Full-Screen Slide)
+   ============================================ */
+.video-card {
+    height: 100dvh;
+    width: 100%;
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
+    position: relative;
+    overflow: hidden;
+    background: var(--bg-primary);
+}
+
+.video-wrapper {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+}
+
+.video-wrapper video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+}
+
+/* Thumbnail / Poster overlay */
+.video-poster {
+    position: absolute;
+    inset: 0;
+    background-size: cover;
+    background-position: center;
+    z-index: 1;
+    transition: opacity 0.3s ease;
+}
+
+.video-poster.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* Play/Pause overlay */
+.play-pause-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.play-icon {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transform: scale(0.8);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    pointer-events: none;
+}
+
+.play-icon.visible {
+    opacity: 1;
+    transform: scale(1);
+}
+
+.play-icon i {
+    font-size: 28px;
+    color: #fff;
+    margin-left: 4px;
+}
+
+.play-icon.paused i {
+    margin-left: 4px;
+}
+
+/* ============================================
+   Video Gradient Overlays
+   ============================================ */
+.gradient-top {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 120px;
+    background: linear-gradient(to bottom, rgba(0, 0, 0, 0.6) 0%, transparent 100%);
+    z-index: 3;
+    pointer-events: none;
+}
+
+.gradient-bottom {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 200px;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.8) 0%, transparent 100%);
+    z-index: 3;
+    pointer-events: none;
+}
+
+/* ============================================
+   Ranking Badge
+   ============================================ */
+.ranking-badge {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: var(--radius-full);
+    background: var(--bg-glass-strong);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--glass-border);
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: 0.02em;
+}
+
+.ranking-badge.rank-1 {
+    background: linear-gradient(135deg, rgba(255, 215, 0, 0.3), rgba(255, 140, 0, 0.2));
+    border-color: rgba(255, 215, 0, 0.3);
+    color: var(--gold);
+}
+
+.ranking-badge.rank-2 {
+    background: linear-gradient(135deg, rgba(192, 192, 192, 0.25), rgba(160, 160, 160, 0.15));
+    border-color: rgba(192, 192, 192, 0.3);
+    color: var(--silver);
+}
+
+.ranking-badge.rank-3 {
+    background: linear-gradient(135deg, rgba(205, 127, 50, 0.3), rgba(180, 100, 30, 0.15));
+    border-color: rgba(205, 127, 50, 0.3);
+    color: var(--bronze);
+}
+
+.ranking-badge .rank-icon {
+    font-size: 16px;
+}
+
+/* ============================================
+   Side Action Buttons
+   ============================================ */
+.side-actions {
+    position: absolute;
+    right: 12px;
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 40px);
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+}
+
+.action-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-primary);
+    outline: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.action-btn .btn-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--bg-glass);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--glass-border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.action-btn:active .btn-icon {
+    transform: scale(0.9);
+}
+
+.action-btn .btn-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+/* Like button */
+.action-btn.liked .btn-icon {
+    background: rgba(255, 45, 85, 0.2);
+    border-color: rgba(255, 45, 85, 0.4);
+    color: var(--accent-primary);
+}
+
+.action-btn.liked .btn-icon i {
+    animation: heartBeat 0.4s ease;
+}
+
+@keyframes heartBeat {
+    0% {
+        transform: scale(1);
+    }
+
+    25% {
+        transform: scale(1.3);
+    }
+
+    50% {
+        transform: scale(0.95);
+    }
+
+    100% {
+        transform: scale(1);
+    }
+}
+
+/* Sound button */
+.action-btn.muted .btn-icon {
+    opacity: 0.6;
+}
+
+/* ============================================
+   Video Info (Bottom Overlay)
+   ============================================ */
+.video-info {
+    position: absolute;
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 16px);
+    left: 16px;
+    right: 80px;
+    z-index: 10;
+}
+
+.video-info .info-source {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: var(--radius-full);
+    background: rgba(29, 161, 242, 0.2);
+    border: 1px solid rgba(29, 161, 242, 0.3);
+    font-size: 12px;
+    color: #1da1f2;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.video-info .info-title {
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--text-primary);
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+/* ============================================
+   Progress Bar
+   ============================================ */
+.video-progress {
+    position: absolute;
+    bottom: calc(var(--nav-height) + var(--safe-bottom));
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.15);
+    z-index: 12;
+    overflow: hidden;
+}
+
+.video-progress .progress-fill {
+    height: 100%;
+    background: var(--accent-gradient);
+    width: 0%;
+    transition: width 0.1s linear;
+    border-radius: 0 2px 2px 0;
+}
+
+/* ============================================
+   Bottom Navigation
+   ============================================ */
+.bottom-nav {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: calc(var(--nav-height) + var(--safe-bottom));
+    padding-bottom: var(--safe-bottom);
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(30px) saturate(180%);
+    -webkit-backdrop-filter: blur(30px) saturate(180%);
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.nav-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    padding: 8px 20px;
+    border-radius: var(--radius-md);
+    transition: all 0.2s ease;
+    outline: none;
+    -webkit-tap-highlight-color: transparent;
+    position: relative;
+}
+
+.nav-btn i {
+    font-size: 18px;
+    transition: transform 0.2s ease;
+}
+
+.nav-btn span {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+}
+
+.nav-btn.active {
+    color: var(--text-primary);
+}
+
+.nav-btn.active::after {
+    content: '';
+    position: absolute;
+    top: -1px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 24px;
+    height: 2px;
+    background: var(--accent-gradient);
+    border-radius: 2px;
+}
+
+.nav-btn:active i {
+    transform: scale(0.85);
+}
+
+/* ============================================
+   Double-tap Heart Animation
+   ============================================ */
+.double-tap-heart {
+    position: absolute;
+    z-index: 20;
+    pointer-events: none;
+    font-size: 80px;
+    color: var(--accent-primary);
+    animation: doubleTapHeart 0.8s ease forwards;
+    filter: drop-shadow(0 0 30px rgba(255, 45, 85, 0.6));
+}
+
+@keyframes doubleTapHeart {
+    0% {
+        transform: scale(0) rotate(-15deg);
+        opacity: 0;
+    }
+
+    15% {
+        transform: scale(1.2) rotate(0deg);
+        opacity: 1;
+    }
+
+    30% {
+        transform: scale(0.95) rotate(0deg);
+        opacity: 1;
+    }
+
+    50% {
+        transform: scale(1.05) rotate(0deg);
+        opacity: 1;
+    }
+
+    100% {
+        transform: scale(1) rotate(0deg);
+        opacity: 0;
+    }
+}
+
+/* ============================================
+   Scroll Indicator
+   ============================================ */
+.scroll-indicator {
+    position: absolute;
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 24px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 15;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    animation: scrollBounce 2s ease-in-out infinite;
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+.scroll-indicator span {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.scroll-indicator i {
+    font-size: 16px;
+    color: var(--text-secondary);
+}
+
+@keyframes scrollBounce {
+
+    0%,
+    100% {
+        transform: translateX(-50%) translateY(0);
+    }
+
+    50% {
+        transform: translateX(-50%) translateY(8px);
+    }
+}
+
+.scroll-indicator.hidden {
+    display: none;
+}
+
+/* ============================================
+   Error State
+   ============================================ */
+.error-state {
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 32px;
+    text-align: center;
+}
+
+.error-state i {
+    font-size: 48px;
+    color: var(--accent-primary);
+    opacity: 0.6;
+}
+
+.error-state h3 {
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.error-state p {
+    font-size: 14px;
+    color: var(--text-secondary);
+    max-width: 300px;
+}
+
+.error-state button {
+    padding: 12px 32px;
+    border-radius: var(--radius-full);
+    background: var(--accent-gradient);
+    border: none;
+    color: white;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.error-state button:active {
+    transform: scale(0.95);
+}
+
+/* ============================================
+   Responsive (Desktop)
+   ============================================ */
+@media (min-width: 768px) {
+    .video-feed {
+        max-width: 420px;
+        margin: 0 auto;
+    }
+
+    .bottom-nav {
+        max-width: 420px;
+        left: 50%;
+        transform: translateX(-50%);
+        border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    }
+
+    .video-progress {
+        max-width: 420px;
+        left: 50%;
+        transform: translateX(-50%);
+    }
+}
+
+/* ============================================
+   Transition helpers
+   ============================================ */
+.fade-in {
+    animation: fadeIn 0.5s ease forwards;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
