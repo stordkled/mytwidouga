@@ -3,4 +3,5 @@ npm-debug.log
 .git
 .gitignore
 .env
+package-lock.json
 
