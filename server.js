@@ -2,7 +2,11 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+
+// Stealth plugin hides headless Chrome fingerprints from Cloudflare
+puppeteer.use(StealthPlugin());
 
 const PORT = process.env.PORT || 3000;
 
@@ -20,7 +24,7 @@ const MIME = {
     '.webmanifest': 'application/manifest+json',
 };
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
 
 // ---- Find browser executable across platforms ----
 function findBrowserPath() {
@@ -29,7 +33,7 @@ function findBrowserPath() {
         return process.env.PUPPETEER_EXECUTABLE_PATH;
     }
 
-    // 2. Linux (Docker / server)
+    // 2. Linux
     const linuxPaths = [
         '/usr/bin/google-chrome-stable',
         '/usr/bin/google-chrome',
@@ -40,7 +44,7 @@ function findBrowserPath() {
         if (fs.existsSync(p)) return p;
     }
 
-    // 3. Windows (local dev)
+    // 3. Windows
     const winPaths = [
         'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
         'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -80,11 +84,19 @@ async function initBrowser() {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
+            '--window-size=1920,1080',
         ],
     });
 
     page = await browser.newPage();
     await page.setUserAgent(UA);
+    await page.setViewport({ width: 1920, height: 1080 });
+
+    // Set extra headers to appear more like a real browser
+    await page.setExtraHTTPHeaders({
+        'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    });
 
     console.log('[Browser] Navigating to twivideo.net...');
     try {
@@ -100,20 +112,73 @@ async function initBrowser() {
     console.log('[Browser] Page title:', title);
 
     if (title.includes('Just a moment')) {
-        console.log('[Browser] Waiting for Cloudflare challenge...');
+        console.log('[Browser] Cloudflare challenge detected, waiting...');
         try {
             await page.waitForFunction(
                 () => !document.title.includes('Just a moment'),
-                { timeout: 30000 }
+                { timeout: 45000 }
             );
+            console.log('[Browser] Challenge passed!');
         } catch (e) {
-            console.log('[Browser] Challenge timeout, continuing...');
+            console.warn('[Browser] Challenge timeout. Retrying navigation...');
+            // Retry once
+            await new Promise(r => setTimeout(r, 5000));
+            try {
+                await page.goto('https://twivideo.net/?ranking', {
+                    waitUntil: 'networkidle2',
+                    timeout: 60000,
+                });
+                const retryTitle = await page.title();
+                console.log('[Browser] Retry title:', retryTitle);
+                if (retryTitle.includes('Just a moment')) {
+                    await page.waitForFunction(
+                        () => !document.title.includes('Just a moment'),
+                        { timeout: 30000 }
+                    );
+                }
+            } catch (e2) {
+                console.error('[Browser] Retry also failed:', e2.message);
+            }
         }
         await new Promise(r => setTimeout(r, 3000));
     }
 
-    browserReady = true;
-    console.log('[Browser] Ready ✓');
+    // Check if we actually got through
+    const finalTitle = await page.title();
+    const hasVideos = await page.evaluate(() => document.querySelectorAll('.art_li').length);
+    console.log(`[Browser] Final title: ${finalTitle}, Videos on page: ${hasVideos}`);
+
+    if (hasVideos > 0) {
+        browserReady = true;
+        console.log('[Browser] Ready ✓');
+    } else {
+        console.error('[Browser] WARNING: No videos found on page. Cloudflare may still be blocking.');
+        // Still mark as ready to allow retries via API
+        browserReady = true;
+    }
+}
+
+// ---- Navigate to specific sort page ----
+async function navigateToSort(sort) {
+    const sortMap = {
+        '24': '?ranking',
+        '7': '?ranking_w',
+        '30': '?ranking_m',
+    };
+    const path = sortMap[sort] || '?ranking';
+    const url = `https://twivideo.net/${path}`;
+
+    console.log(`[Browser] Navigating to ${url}...`);
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+
+    const title = await page.title();
+    if (title.includes('Just a moment')) {
+        await page.waitForFunction(
+            () => !document.title.includes('Just a moment'),
+            { timeout: 30000 }
+        ).catch(() => { });
+        await new Promise(r => setTimeout(r, 3000));
+    }
 }
 
 // ---- Fetch videos via browser context ----
@@ -124,11 +189,19 @@ async function fetchVideosViaBrowser(sort = '24', offset = 0, limit = 30) {
     }
 
     try {
-        const html = await page.evaluate(async (sort, offset, limit) => {
-            if (offset === 0 && document.querySelectorAll('.art_li').length > 0) {
-                return document.documentElement.outerHTML;
-            }
+        // For initial load, scrape current page
+        if (offset === 0) {
+            await navigateToSort(sort);
+            const count = await page.evaluate(() => document.querySelectorAll('.art_li').length);
+            console.log(`[API] Found ${count} videos on page`);
 
+            if (count > 0) {
+                return await page.evaluate(() => document.documentElement.outerHTML);
+            }
+        }
+
+        // For pagination, use fetch within browser context
+        const html = await page.evaluate(async (sort, offset, limit) => {
             const body = `offset=${offset}&limit=${limit}&tag=null&type=ranking&order=${sort}&le=1000&ty=p6&myarray=[]&offset_int=${offset}`;
             const resp = await fetch('https://twivideo.net/templates/view_lists.php', {
                 method: 'POST',
@@ -139,22 +212,9 @@ async function fetchVideosViaBrowser(sort = '24', offset = 0, limit = 30) {
         }, sort, offset, limit);
 
         if (html && html.includes('Just a moment')) {
-            console.log('[API] Cloudflare detected, re-navigating...');
-            await page.goto('https://twivideo.net/?ranking', {
-                waitUntil: 'networkidle2',
-                timeout: 30000,
-            });
-            await new Promise(r => setTimeout(r, 5000));
-
-            return await page.evaluate(async (sort, offset, limit) => {
-                const body = `offset=${offset}&limit=${limit}&tag=null&type=ranking&order=${sort}&le=1000&ty=p6&myarray=[]&offset_int=${offset}`;
-                const resp = await fetch('https://twivideo.net/templates/view_lists.php', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body,
-                });
-                return await resp.text();
-            }, sort, offset, limit);
+            console.log('[API] Cloudflare in fetch response, re-navigating...');
+            await navigateToSort(sort);
+            return await page.evaluate(() => document.documentElement.outerHTML);
         }
 
         return html;
@@ -242,6 +302,27 @@ function serveStatic(req, res) {
 // ---- HTTP Server ----
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // Debug endpoint to check browser status
+    if (req.url === '/api/status') {
+        const status = {
+            browserReady,
+            hasBrowser: !!browser,
+            hasPage: !!page,
+            timestamp: new Date().toISOString(),
+        };
+        if (page) {
+            try {
+                status.pageTitle = await page.title();
+                status.videoCount = await page.evaluate(() => document.querySelectorAll('.art_li').length);
+            } catch (e) {
+                status.error = e.message;
+            }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(status, null, 2));
+        return;
+    }
 
     if (req.url.startsWith('/api/videos')) {
         if (!browserReady) {
