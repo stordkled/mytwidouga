@@ -7,6 +7,6 @@
         "dev": "node server.js"
     },
     "dependencies": {
-        "puppeteer": "^21.11.0"
+        "puppeteer-core": "^21.11.0"
     }
 }

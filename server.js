@@ -2,7 +2,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
 
 const PORT = process.env.PORT || 3000;
 
@@ -22,16 +22,58 @@ const MIME = {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36';
 
+// ---- Find browser executable across platforms ----
+function findBrowserPath() {
+    // 1. Environment variable (set by Docker image)
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+        return process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+
+    // 2. Linux (Docker / server)
+    const linuxPaths = [
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+    ];
+    for (const p of linuxPaths) {
+        if (fs.existsSync(p)) return p;
+    }
+
+    // 3. Windows (local dev)
+    const winPaths = [
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    ];
+    for (const p of winPaths) {
+        if (fs.existsSync(p)) return p;
+    }
+
+    // 4. macOS
+    const macPaths = [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    ];
+    for (const p of macPaths) {
+        if (fs.existsSync(p)) return p;
+    }
+
+    throw new Error('No browser found! Set PUPPETEER_EXECUTABLE_PATH env var.');
+}
+
 // ---- Persistent browser for Cloudflare bypass ----
 let browser = null;
 let page = null;
 let browserReady = false;
 
 async function initBrowser() {
-    console.log('[Browser] Launching Puppeteer (Chromium)...');
+    const execPath = findBrowserPath();
+    console.log('[Browser] Using:', execPath);
 
-    // Use bundled Chromium, no executablePath needed
     browser = await puppeteer.launch({
+        executablePath: execPath,
         headless: 'new',
         args: [
             '--no-sandbox',
@@ -44,18 +86,16 @@ async function initBrowser() {
     page = await browser.newPage();
     await page.setUserAgent(UA);
 
-    // Navigate to twivideo to pass Cloudflare challenge
-    console.log('[Browser] Navigating to twivideo.net (Cloudflare challenge)...');
+    console.log('[Browser] Navigating to twivideo.net...');
     try {
         await page.goto('https://twivideo.net/?ranking', {
             waitUntil: 'networkidle2',
             timeout: 60000,
         });
     } catch (e) {
-        console.warn('[Browser] Navigation timeout or error:', e.message);
+        console.warn('[Browser] Navigation timeout:', e.message);
     }
 
-    // Wait for challenge to resolve
     const title = await page.title();
     console.log('[Browser] Page title:', title);
 
@@ -67,56 +107,45 @@ async function initBrowser() {
                 { timeout: 30000 }
             );
         } catch (e) {
-            console.log('[Browser] Challenge may still be pending, continuing...');
+            console.log('[Browser] Challenge timeout, continuing...');
         }
         await new Promise(r => setTimeout(r, 3000));
-        const newTitle = await page.title();
-        console.log('[Browser] Page title after wait:', newTitle);
     }
 
     browserReady = true;
-    console.log('[Browser] Ready! Cloudflare passed ✓');
+    console.log('[Browser] Ready ✓');
 }
 
-// ---- Fetch videos using the browser context (bypasses Cloudflare) ----
+// ---- Fetch videos via browser context ----
 async function fetchVideosViaBrowser(sort = '24', offset = 0, limit = 30) {
     if (!browserReady || !page) {
-        // Try to re-init if crashed
         if (!browser) await initBrowser();
         if (!browserReady) throw new Error('Browser not ready');
     }
 
     try {
         const html = await page.evaluate(async (sort, offset, limit) => {
-            // For initial load (offset 0), we can just scrape the current page if it's the ranking page
             if (offset === 0 && document.querySelectorAll('.art_li').length > 0) {
                 return document.documentElement.outerHTML;
             }
 
             const body = `offset=${offset}&limit=${limit}&tag=null&type=ranking&order=${sort}&le=1000&ty=p6&myarray=[]&offset_int=${offset}`;
-
-            // Use standard fetch without custom headers - let the browser handle cookies/referer
             const resp = await fetch('https://twivideo.net/templates/view_lists.php', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body,
             });
-
             return await resp.text();
         }, sort, offset, limit);
 
-        // If we got a Cloudflare page, try re-navigating
         if (html && html.includes('Just a moment')) {
-            console.log('[API] Got Cloudflare challenge in response, re-navigating...');
+            console.log('[API] Cloudflare detected, re-navigating...');
             await page.goto('https://twivideo.net/?ranking', {
                 waitUntil: 'networkidle2',
                 timeout: 30000,
             });
             await new Promise(r => setTimeout(r, 5000));
 
-            // Retry once
             return await page.evaluate(async (sort, offset, limit) => {
                 const body = `offset=${offset}&limit=${limit}&tag=null&type=ranking&order=${sort}&le=1000&ty=p6&myarray=[]&offset_int=${offset}`;
                 const resp = await fetch('https://twivideo.net/templates/view_lists.php', {
@@ -130,8 +159,7 @@ async function fetchVideosViaBrowser(sort = '24', offset = 0, limit = 30) {
 
         return html;
     } catch (err) {
-        console.error('[API] Browser evaluation failed:', err.message);
-        // If error is related to target closed, re-init
+        console.error('[API] Error:', err.message);
         if (err.message.includes('Target closed') || err.message.includes('Session closed')) {
             browserReady = false;
             browser = null;
@@ -140,7 +168,7 @@ async function fetchVideosViaBrowser(sort = '24', offset = 0, limit = 30) {
     }
 }
 
-// ---- Proxy: stream remote content (video/images) ----
+// ---- Proxy: stream remote content ----
 function proxyStream(targetUrl, clientReq, clientRes) {
     const parsed = new URL(targetUrl);
     const options = {
@@ -215,7 +243,6 @@ function serveStatic(req, res) {
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
 
-    // API: fetch videos
     if (req.url.startsWith('/api/videos')) {
         if (!browserReady) {
             res.writeHead(503, { 'Content-Type': 'text/plain' });
@@ -240,7 +267,6 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // Proxy: stream video/image from Twitter CDN
     if (req.url.startsWith('/proxy/media')) {
         const url = new URL(req.url, `http://localhost:${PORT}`);
         const targetUrl = url.searchParams.get('url');
@@ -251,7 +277,6 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // Static files
     serveStatic(req, res);
 });
 
@@ -260,7 +285,7 @@ const server = http.createServer(async (req, res) => {
     server.listen(PORT, '0.0.0.0', () => {
         console.log(`\n  🎬 TWIVIDEO Shorts`);
         console.log(`  ➜  Local:   http://localhost:${PORT}/`);
-        console.log(`  ➜  Launching Puppeteer...\n`);
+        console.log(`  ➜  Launching browser...\n`);
     });
 
     try {
@@ -270,7 +295,6 @@ const server = http.createServer(async (req, res) => {
     }
 })();
 
-// ---- Cleanup on exit ----
 process.on('SIGINT', async () => {
     console.log('\n[Shutdown] Closing browser...');
     if (browser) await browser.close().catch(() => { });
