@@ -1,5 +1,5 @@
 const { loadHtml, cleanText, absUrl } = require('../lib/html');
-const { getText, responseFailure } = require('../lib/http');
+const { UA, getText, responseFailure } = require('../lib/http');
 const { withMirror, activeBase, embedTemplateFor, fillTemplate } = require('../lib/mirrors');
 
 // Most-viewed boards. Pornhub's public listing is /video?o=mv with t=t|w|m
@@ -18,9 +18,10 @@ const DEFAULT_BASES = [
 ];
 const ORIGIN = DEFAULT_BASES[0];
 
-// ja Accept-Language redirects onto jp.pornhub.com, whose mediaDefinitions
-// point at hv-h.phncdn.com URLs that return 410. en-US stays on www and
-// returns ev-h.phncdn.com playlists that actually stream.
+// ja Accept-Language redirects onto jp.pornhub.com. The watch page also
+// alternates the signed host on www: ev-h.phncdn.com URLs (validfrom/hash)
+// return a playlist, while hv-h.phncdn.com URLs (?h=&e=) answer 410 to a
+// plain GET. Resolve probes a candidate and refetches until one plays.
 const PAGE_HEADERS = {
     Cookie: 'accessAgeDisclaimerPH=2',
     'Accept-Language': 'en-US,en;q=0.9',
@@ -116,15 +117,213 @@ function extractMediaDefinitions(html) {
     return [];
 }
 
+// hv-h links signed with ?h=&e= are rejected by the CDN (410). ev-h links
+// signed with validfrom/validto/hash return a playlist from the same IP.
+function shortSignedHls(url) {
+    const value = String(url || '');
+    if (/hv-h\.phncdn\.com/i.test(value)) return true;
+    return /[?&]h=/.test(value) && !/[?&]validfrom=/.test(value);
+}
+
+function mediaScore(item) {
+    const url = String(item.videoUrl || '');
+    let score = 0;
+    if (item.format === 'hls') score += 100;
+    else if (item.format === 'mp4') score += 40;
+    if (String(item.quality) === '720') score += 30;
+    else if (item.defaultQuality) score += 20;
+    const height = Number(item.height) || Number(item.quality) || 0;
+    if (height > 0 && height <= 1080) score += height / 100;
+    if (shortSignedHls(url)) score -= 80;
+    if (item.remote || url.includes('/video/get_media')) score -= 5;
+    return score;
+}
+
+function rankMedia(definitions) {
+    return (definitions || [])
+        .filter((item) => item && item.videoUrl && (item.format === 'hls' || item.format === 'mp4' || item.remote))
+        .map((item, index) => ({ item, index }))
+        .sort((a, b) => mediaScore(b.item) - mediaScore(a.item) || a.index - b.index)
+        .map((entry) => entry.item);
+}
+
 function pickMedia(definitions) {
-    const playable = (definitions || []).filter((item) => item && item.videoUrl && (item.format === 'hls' || item.format === 'mp4'));
-    const hls = playable.filter((item) => item.format === 'hls');
-    const preferred = hls.find((item) => item.defaultQuality)
-        || hls.find((item) => String(item.quality) === '720')
-        || hls.slice().sort((a, b) => (b.height || 0) - (a.height || 0))[0];
-    if (preferred) return { kind: 'hls', url: preferred.videoUrl };
-    const mp4 = playable.find((item) => item.format === 'mp4');
-    if (mp4) return { kind: 'file', url: mp4.videoUrl };
+    const preferred = rankMedia(definitions).find((item) => !item.remote && !String(item.videoUrl).includes('/video/get_media'));
+    if (!preferred) return null;
+    if (preferred.format === 'mp4') return { kind: 'file', url: preferred.videoUrl };
+    return { kind: 'hls', url: preferred.videoUrl };
+}
+
+function mergeCookies(header, setCookie) {
+    const jar = new Map();
+    for (const part of String(header || '').split(';')) {
+        const eq = part.indexOf('=');
+        if (eq > 0) jar.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim());
+    }
+    for (const cookie of setCookie || []) {
+        const pair = String(cookie).split(';')[0];
+        const eq = pair.indexOf('=');
+        if (eq > 0) jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+    }
+    return [...jar].map(([name, value]) => `${name}=${value}`).join('; ');
+}
+
+function firstUri(playlist) {
+    for (const line of String(playlist || '').split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith('#')) return trimmed;
+    }
+    return '';
+}
+
+async function fetchBytes(url, referer, headers) {
+    const response = await fetch(url, {
+        redirect: 'follow',
+        signal: AbortSignal.timeout(12000),
+        headers: {
+            'User-Agent': UA,
+            Accept: '*/*',
+            Referer: referer,
+            ...headers,
+        },
+    });
+    return response;
+}
+
+async function playlistText(url, referer) {
+    const response = await fetchBytes(url, referer);
+    const text = await response.text();
+    if (!response.ok || !text.startsWith('#EXTM3U')) return null;
+    return { text, url: response.url || url };
+}
+
+async function startsWithSyncByte(url, referer) {
+    const response = await fetchBytes(url, referer, { Range: 'bytes=0-187' });
+    if (response.status !== 200 && response.status !== 206) {
+        if (response.body) await response.body.cancel();
+        return false;
+    }
+    const reader = response.body.getReader();
+    const { value } = await reader.read();
+    await reader.cancel();
+    return Boolean(value && value[0] === 0x47);
+}
+
+async function fileStarts(url, referer) {
+    const response = await fetchBytes(url, referer, { Range: 'bytes=0-31' });
+    if (response.status !== 200 && response.status !== 206) {
+        if (response.body) await response.body.cancel();
+        return false;
+    }
+    const reader = response.body.getReader();
+    const { value } = await reader.read();
+    await reader.cancel();
+    if (!value) return false;
+    return Buffer.from(value).includes(Buffer.from('ftyp'));
+}
+
+// A usable HLS URL is one whose master is a playlist and whose first media
+// segment loads with the watch-page Referer. Segments 404 when that Referer
+// is missing, which is why playback goes through the relay.
+async function hlsPlays(masterUrl, referer) {
+    const master = await playlistText(masterUrl, referer);
+    if (!master) return false;
+    const listed = firstUri(master.text);
+    if (!listed) return false;
+    let mediaUrl = new URL(listed, master.url).href;
+    if (/\.m3u8(\?|$)/i.test(new URL(mediaUrl).pathname)) {
+        const variant = await playlistText(mediaUrl, referer);
+        if (!variant) return false;
+        const segment = firstUri(variant.text);
+        if (!segment) return true;
+        mediaUrl = new URL(segment, variant.url).href;
+    }
+    return startsWithSyncByte(mediaUrl, referer);
+}
+
+async function expandItem(item, referer, cookie) {
+    const url = String(item.videoUrl || '');
+    if (!url.includes('/video/get_media')) {
+        if (item.format === 'mp4') return [{ kind: 'file', url }];
+        if (item.format === 'hls') return [{ kind: 'hls', url }];
+        return [];
+    }
+    let response;
+    try {
+        response = await fetch(url, {
+            redirect: 'manual',
+            signal: AbortSignal.timeout(12000),
+            headers: {
+                'User-Agent': UA,
+                Accept: 'application/json, text/javascript, */*; q=0.01',
+                Referer: referer,
+                Origin: new URL(referer).origin,
+                'X-Requested-With': 'XMLHttpRequest',
+                Cookie: cookie,
+            },
+        });
+    } catch {
+        return [];
+    }
+    if (!response.ok) {
+        if (response.body) await response.body.cancel();
+        return [];
+    }
+    let data;
+    try {
+        data = await response.json();
+    } catch {
+        return [];
+    }
+    if (!Array.isArray(data)) return [];
+    const expanded = [];
+    for (const entry of rankMedia(data)) {
+        const nested = String(entry.videoUrl || '');
+        if (!nested || nested.includes('/video/get_media')) continue;
+        expanded.push({ kind: entry.format === 'mp4' ? 'file' : 'hls', url: nested });
+    }
+    return expanded;
+}
+
+async function candidatePlays(media, referer) {
+    try {
+        if (media.kind === 'hls') return await hlsPlays(media.url, referer);
+        return await fileStarts(media.url, referer);
+    } catch {
+        return false;
+    }
+}
+
+const RESOLVE_ATTEMPTS = 4;
+
+async function findPlayable(base, id) {
+    const pageUrl = `${base}/view_video.php?viewkey=${id}`;
+    const referer = `${base}/`;
+    let cookie = PAGE_HEADERS.Cookie;
+    for (let attempt = 0; attempt < RESOLVE_ATTEMPTS; attempt += 1) {
+        const response = await getText(pageUrl, {
+            timeout: 12000,
+            headers: { ...PAGE_HEADERS, Cookie: cookie },
+            referer,
+        });
+        const failure = responseFailure(response);
+        if (failure) throw new Error(failure);
+        cookie = mergeCookies(cookie, response.cookies);
+        let probedShort = false;
+        for (const item of rankMedia(extractMediaDefinitions(response.text))) {
+            const options = await expandItem(item, referer, cookie);
+            for (const media of options) {
+                if (media.kind === 'hls' && shortSignedHls(media.url)) {
+                    if (probedShort) continue;
+                    probedShort = true;
+                }
+                if (await candidatePlays(media, referer)) {
+                    console.log(`[pornhub] playable ${media.kind} on attempt ${attempt + 1} (${new URL(media.url).host})`);
+                    return media;
+                }
+            }
+        }
+    }
     return null;
 }
 
@@ -163,16 +362,8 @@ async function resolvePlayback(id) {
     const embedUrl = getEmbedUrl({ id });
     try {
         const { result } = await withMirror('pornhub', DEFAULT_BASES, async (base) => {
-            const pageUrl = `${base}/view_video.php?viewkey=${id}`;
-            const response = await getText(pageUrl, {
-                timeout: 12000,
-                headers: PAGE_HEADERS,
-                referer: `${base}/`,
-            });
-            const failure = responseFailure(response);
-            if (failure) throw new Error(failure);
-            const media = pickMedia(extractMediaDefinitions(response.text));
-            if (!media) throw new Error('no mediaDefinitions');
+            const media = await findPlayable(base, id);
+            if (!media) throw new Error('no playable media');
             return media;
         });
         return { kind: result.kind, url: result.url, embedUrl, referer: `${currentBase()}/` };
@@ -201,6 +392,8 @@ module.exports = {
     listingIsRanking,
     extractMediaDefinitions,
     pickMedia,
+    rankMedia,
+    shortSignedHls,
     SELECTORS,
     PERIODS,
 };

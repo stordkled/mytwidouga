@@ -119,6 +119,15 @@ test('pornhub listing parser and safe-for-work guard', () => {
     const media = pornhub.pickMedia(defs);
     assert.equal(media.kind, 'hls');
     assert.equal(media.url, 'https://ev-h.phncdn.com/a.m3u8');
+
+    const ranked = pornhub.rankMedia([
+        { format: 'hls', quality: '1080', height: 1080, videoUrl: 'https://hv-h.phncdn.com/hls/a/master.m3u8?h=abc&e=1&f=1' },
+        { format: 'hls', quality: '720', height: 720, videoUrl: 'https://ev-h.phncdn.com/hls/a/master.m3u8?validfrom=1&validto=2&hash=x' },
+        { format: 'mp4', remote: true, videoUrl: 'https://www.pornhub.com/video/get_media?s=1&v=abc' },
+    ]);
+    assert.equal(ranked[0].videoUrl.includes('ev-h.phncdn.com'), true);
+    assert.equal(pornhub.shortSignedHls(ranked[0].videoUrl), false);
+    assert.equal(pornhub.shortSignedHls('https://hv-h.phncdn.com/hls/a/master.m3u8?h=abc&e=1'), true);
 });
 
 test('85po popular cards and mp4 picker', () => {

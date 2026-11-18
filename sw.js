@@ -1,4 +1,4 @@
-const CACHE_NAME = 'twivideo-shorts-v6';
+const CACHE_NAME = 'twivideo-shorts-v7';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
@@ -9,44 +9,83 @@ const STATIC_ASSETS = [
     'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css',
 ];
 
-// Install: cache static assets
+function appShell(url) {
+    if (url.origin !== self.location.origin) return false;
+    return url.pathname === '/'
+        || url.pathname === '/index.html'
+        || url.pathname === '/sw.js'
+        || url.pathname === '/manifest.webmanifest'
+        || url.pathname.startsWith('/src/');
+}
+
+async function networkFirst(request) {
+    try {
+        const response = await fetch(request);
+        if (response && response.ok && request.method === 'GET') {
+            const cache = await caches.open(CACHE_NAME);
+            cache.put(request, response.clone());
+        }
+        return response;
+    } catch (err) {
+        const cached = await caches.match(request);
+        if (cached) return cached;
+        throw err;
+    }
+}
+
+// Install: prime the cache from the network. cache: 'reload' avoids storing
+// a copy that an older worker already had in the HTTP cache.
 self.addEventListener('install', (event) => {
     event.waitUntil(
-        caches.open(CACHE_NAME).then((cache) => {
-            return cache.addAll(STATIC_ASSETS);
-        })
+        caches.open(CACHE_NAME).then((cache) => Promise.all(STATIC_ASSETS.map(async (asset) => {
+            try {
+                const response = await fetch(asset, { cache: 'reload' });
+                if (response.ok) await cache.put(asset, response);
+            } catch {
+                // A missing font or a blocked CDN must not keep the old worker in place.
+            }
+        })))
     );
     self.skipWaiting();
 });
 
-// Activate: clean old caches
+// Activate: drop old caches, take control, and reload open pages so they
+// don't keep running a main.js the previous worker cached.
 self.addEventListener('activate', (event) => {
-    event.waitUntil(
-        caches.keys().then((keys) => {
-            return Promise.all(
-                keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))
-            );
-        })
-    );
-    self.clients.claim();
+    event.waitUntil((async () => {
+        const keys = await caches.keys();
+        await Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)));
+        await self.clients.claim();
+        const windows = await self.clients.matchAll({ type: 'window' });
+        await Promise.all(windows.map((client) => client.navigate(client.url)));
+    })());
 });
 
-// Fetch: network-first for API/proxy, cache-first for static assets
+// Fetch: the app shell is network-first so a new main.js is not pinned by
+// the previous cache. API and media relays are network-only. Everything else
+// (fonts, icons) stays cache-first.
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
-    // API and proxy calls: always go to network
+    if (event.request.headers.get('service-worker')) {
+        event.respondWith(fetch(event.request));
+        return;
+    }
+
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/proxy/')) {
         event.respondWith(fetch(event.request));
         return;
     }
 
-    // Static assets: cache-first
+    if (appShell(url)) {
+        event.respondWith(networkFirst(event.request));
+        return;
+    }
+
     event.respondWith(
         caches.match(event.request).then((cached) => {
             if (cached) return cached;
             return fetch(event.request).then((response) => {
-                // Cache successful responses
                 if (response.ok) {
                     const clone = response.clone();
                     caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
