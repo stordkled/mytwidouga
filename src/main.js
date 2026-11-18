@@ -1101,10 +1101,14 @@ async function init() {
         playbackConfig = data.playback || playbackConfig;
         if (sources.length === 0) throw new Error('ソースがありません');
         const saved = localStorage.getItem(STORAGE_SOURCE);
+        // A source the server no longer has (a removed adapter) is
+        // forgotten, so this browser opens on the default from now on.
+        if (saved && !sources.some((source) => source.id === saved)) {
+            localStorage.removeItem(STORAGE_SOURCE);
+        }
         // A source hidden in config/sources.json is not offered, even if it
-        // was the last one this browser used.
-        const offered = visibleSources();
-        selectSource(offered.find((source) => source.id === saved) || offered[0], false);
+        // was the last one this browser used. With nothing saved: TwiKeep.
+        selectSource(Logic.initialSource(visibleSources(), saved), false);
         renderSourceBar();
         renderPeriodBar();
         await loadVideos();

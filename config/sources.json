@@ -17,12 +17,9 @@
       "hidden": true,
       "bases": ["https://twivideo.net"]
     },
-    "pornhub": {
-      "bases": [
-        "https://www.pornhub.com",
-        "https://jp.pornhub.com",
-        "https://rt.pornhub.com"
-      ]
+    "twikeep": {
+      "bases": ["https://www.twikeep.com"],
+      "metric": "downloads"
     },
     "85po": {
       "bases": [
@@ -31,22 +28,15 @@
         "https://www.85ro.com"
       ]
     },
+    "pornhub": {
+      "bases": [
+        "https://www.pornhub.com",
+        "https://jp.pornhub.com",
+        "https://rt.pornhub.com"
+      ]
+    },
     "tokyomotion": {
       "bases": ["https://www.tokyomotion.net"]
-    },
-    "missav": {
-      "hidden": true,
-      "bases": [
-        "https://missav.ws",
-        "https://missav.ai",
-        "https://missav.live",
-        "https://missav123.com"
-      ],
-      "playlistHosts": ["surrit.com"]
-    },
-    "twikeep": {
-      "bases": ["https://www.twikeep.com"],
-      "metric": "downloads"
     },
     "twihozon": {
       "bases": ["https://www.twihozon.org"]

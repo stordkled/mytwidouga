@@ -23,9 +23,9 @@ Edit `config/sources.json`, or override it without a code change:
 | Variable | Meaning |
 | --- | --- |
 | `SOURCES_CONFIG` | Path to the JSON file. |
-| `SOURCE_BASES_85PO` | Comma-separated base URLs, tried in order. Same pattern for `PORNHUB`, `MISSAV`, `TOKYOMOTION`, `TWIVIDEO`. |
-| `SOURCE_PLAYLIST_HOSTS_MISSAV` | Playlist/CDN hosts merged into that source's proxy allowlist. |
-| `SOURCE_EMBED_MISSAV` | Embed template. `{id}` and `{base}` are replaced. |
+| `SOURCE_BASES_85PO` | Comma-separated base URLs, tried in order. Same pattern for `PORNHUB`, `TOKYOMOTION`, `TWIVIDEO`, `TWIKEEP`, `TWIHOZON`. |
+| `SOURCE_PLAYLIST_HOSTS_PORNHUB` | Playlist/CDN hosts merged into that source's proxy allowlist. |
+| `SOURCE_EMBED_TWIVIDEO` | Embed template. `{id}` and `{base}` are replaced. |
 | `CACHE_TTL_MS` | Ranking cache. Default 30 minutes. |
 | `RESOLVE_TTL_MS` | Signed media URL cache. Default 3 minutes. |
 | `DOMAIN_MEMORY_TTL_MS` | How long the last working domain is preferred. Default 30 minutes. |
@@ -36,12 +36,14 @@ Edit `config/sources.json`, or override it without a code change:
 | `PROXY_QUEUE_MS` | How long a relay request waits for a free slot before `429`. Default 8 seconds. |
 | `TRUST_PROXY` | `1` keys the per-viewer cap on `X-Forwarded-For`. Only set this behind your own reverse proxy. |
 | `SOURCE_METRIC_TWIKEEP` | `downloads` (default, saves) or `views`. Same as `"metric"` under `twikeep` in the JSON. |
-| `SOURCE_HIDDEN_MISSAV` | `1`/`0` overrides `"hidden"` for one source. Hidden sources stay in the API but not in the switcher. |
+| `SOURCE_HIDDEN_TWIVIDEO` | `1`/`0` overrides `"hidden"` for one source. Hidden sources stay in the API but not in the switcher. |
 | `BROWSER_IDLE_MS` | Headless Chrome (if a source uses it) is closed after this long without a page. Default 5 minutes. |
 
 `config/sources.json` is re-read when its modification time changes (checked at most every 2 seconds), so edits apply without a restart. `GET /api/status` includes `domains.<id>.active`, `expiresAt`, `candidates`, the playback settings, and `proxy` (`activeStreams`, `waiting`, `clients`).
 
-`twivideo` and `missav` are `"hidden": true` in the shipped config: from this network both answer with a Cloudflare page, so they are not offered and the server does not probe them on every start.
+`twivideo` is `"hidden": true` in the shipped config: from this network it answers with a Cloudflare page, so it is not offered and the server does not probe it on every start.
+
+The switcher order is the order in `sources/index.js`: TwiKeep, 85po, Pornhub, TokyoMotion, Twihozon (hidden `twivideo` is listed first in the API but not shown). Automatic switching after a failure follows the same order.
 
 Thumbnails load straight from the CDN with `referrerpolicy=no-referrer`. If that image fails, that source's posters fall back to `/proxy/media`. Set `SOURCE_THUMBS_85PO=proxy` (or `direct`) to skip the probe. A source whose ranking keeps failing is removed from the switcher (`hideFailedSources`, default on, after `hideAfterFailures` consecutive failures, default 3; a block page counts as one failure like any other). A hidden source comes back after `hiddenRetryMs` (default 10 minutes, `HIDDEN_RETRY_MS`); one success clears its record, one more failure hides it again. `HIDE_FAILED_SOURCES=0` keeps every tab. When a ranking fails the feed moves to the next source that is neither hidden nor already failed, and the note bar says why; when none is left it stops and shows a retry button. TwiKeep takes `/api/videos?metric=downloads|views` (the bottom bar has a 保存数/表示数 toggle), and each metric is cached separately.
 
@@ -61,18 +63,17 @@ The media URL is resolved when the card is about to play. If that attempt fails,
 | id | Site | Periods | Playback |
 | --- | --- | --- | --- |
 | `twivideo` | twivideo.net | 24時間 / 1週間 / 1ヶ月 | Direct MP4 when the HTML is reachable. No official embed unless `SOURCE_EMBED_TWIVIDEO` is set. |
-| `pornhub` | pornhub.com, then jp and rt | 24時間 / 1週間 / 1ヶ月 (`/video?o=mv&t=t\|w\|m`) | A progressive MP4 when the watch page has one, else HLS. A URL with `ip=` or `ipa=` is bound to the resolver, so the viewer never fetches it directly; the relay answers each Range with at most 8MB. The resolver skips signed URLs whose playlist or segment does not load (the `hv-h` `?h=&e=` form answers 410). A safe-for-work redirect tries the next domain. |
-| `85po` | 85po.com, then 85po.net, then 85ro.com | 24時間 / 1週間 / 1ヶ月 | `get_file` MP4, then `https://<base>/embed/<id>/`. |
-| `tokyomotion` | tokyomotion.net | 今日 / 今週 / 今月 | `/vsrc/` MP4. The official embed is `https://<base>/embed/<token>` from the watch page, not the numeric id. |
-| `missav` | missav.ws, missav.ai, missav.live, missav123.com | 今日 / 週間 / 月間 | Embed only, regardless of playback mode. No official embed URL was found; set `SOURCE_EMBED_MISSAV` if you have one. Without it, resolve fails explicitly without fetching a watch page or extracting media. |
 | `twikeep` | twikeep.com | 24時間 / 1週間 / 1ヶ月 / 1年 (`range=24h\|1w\|1m\|1y`) | The `/ranking` page is client-rendered, so the adapter reads the public JSON it loads, `/api/ranking?metric=downloads&range=…`, over plain HTTP (no browser). Ranked by saves (`downloads`) by default; `"metric": "views"` in config or `SOURCE_METRIC_TWIKEEP=views` switches to views. Direct `video.twimg.com` MP4 and `pbs.twimg.com` thumbnail. |
+| `85po` | 85po.com, then 85po.net, then 85ro.com | 24時間 / 1週間 / 1ヶ月 | `get_file` MP4, then `https://<base>/embed/<id>/`. |
+| `pornhub` | pornhub.com, then jp and rt | 24時間 / 1週間 / 1ヶ月 (`/video?o=mv&t=t\|w\|m`) | A progressive MP4 when the watch page has one, else HLS. A URL with `ip=` or `ipa=` is bound to the resolver, so the viewer never fetches it directly; the relay answers each Range with at most 8MB. The resolver skips signed URLs whose playlist or segment does not load (the `hv-h` `?h=&e=` form answers 410). A safe-for-work redirect tries the next domain. |
+| `tokyomotion` | tokyomotion.net | 今日 / 今週 / 今月 | `/vsrc/` MP4. The official embed is `https://<base>/embed/<token>` from the watch page, not the numeric id. |
 | `twihozon` | twihozon.org | 24時間 / 1週間 / 1ヶ月 (`/`, `/week.html`, `/month.html`) | Direct `video.twimg.com` MP4 from the listing HTML. A card without one resolves from `/play-<id>-video.html`. The all-time board (`/all.html`) is not offered. |
 
 Both Twitter sources start on the **direct** step (the Twitter CDN plays without a Referer). If that fails, the usual ladder applies. Neither has an embed. Their proxy allowlist is `twimg.com` only.
 
 None of the sites publish a 3-day board. Only TwiKeep has a 1年 board; asking another source for `period=1y` falls back to its month board. The old 3-day tab did not map to a twivideo ranking either. Asking for `period=3d` (or the legacy `sort=3days`) returns the nearest real board and sets `fallback` so the UI can say so. The period tabs themselves are the periods that source exports, so a month board shows up as 1ヶ月 / 月間 instead of a mislabeled week.
 
-The last site and its period are stored in `localStorage`.
+The last site and its period are stored in `localStorage`. A browser with nothing saved opens on TwiKeep (the first offered source if TwiKeep is hidden). A saved site that is hidden or no longer exists falls back the same way; one the server no longer has is also cleared from `localStorage`.
 
 ## API
 
@@ -80,7 +81,7 @@ The last site and its period are stored in `localStorage`.
 - `GET /api/videos?source=85po&period=24h` — normalized videos. A source failure is `{ ok: false, error }` and does not affect the others.
 - `GET /api/resolve?source=pornhub&id=...` — turn a `playback.kind: "resolve"` item into `file`, `hls`, or `embed`.
 - `GET /api/external?source=twivideo&id=...` — original-post URL for sources that need a lookup.
-- `GET /proxy/media?source=missav&url=...` — streams a URL whose host is on that source's allowlist, with that source's Referer. m3u8 responses are rewritten so segments and keys also go through the proxy. Private hosts and unknown hosts are rejected.
+- `GET /proxy/media?source=pornhub&url=...` — streams a URL whose host is on that source's allowlist, with that source's Referer. m3u8 responses are rewritten so segments and keys also go through the proxy. Private hosts and unknown hosts are rejected.
 
 Rankings are cached per source and period for 30 minutes. Resolved media URLs are cached for 3 minutes because many of them are signed. A domain that already answered is reused until `DOMAIN_MEMORY_TTL_MS`, so a later period does not probe the failing domains again.
 

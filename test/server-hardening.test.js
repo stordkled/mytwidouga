@@ -77,19 +77,20 @@ test('static files are limited to the PWA itself', () => {
 
 test('a source hidden in config is left out of the switcher until an env override', () => {
     const hidden = Object.fromEntries(sources.list().map((source) => [source.id, source.hidden]));
-    assert.equal(hidden.missav, true);
     assert.equal(hidden.twivideo, true);
+    assert.equal(hidden.twikeep, false);
     assert.equal(hidden.pornhub, false);
     assert.equal(hidden['85po'], false);
     assert.equal(hidden.tokyomotion, false);
 
-    process.env.SOURCE_HIDDEN_MISSAV = '0';
+    process.env.SOURCE_HIDDEN_TWIVIDEO = '0';
     try {
-        assert.equal(mirrors.hiddenFor('missav'), false);
-        assert.equal(sources.list().find((source) => source.id === 'missav').hidden, false);
+        assert.equal(mirrors.hiddenFor('twivideo'), false);
+        assert.equal(sources.list().find((source) => source.id === 'twivideo').hidden, false);
     } finally {
-        delete process.env.SOURCE_HIDDEN_MISSAV;
+        delete process.env.SOURCE_HIDDEN_TWIVIDEO;
     }
+    assert.equal(sources.list().find((source) => source.id === 'twivideo').hidden, true);
 });
 
 test('relay limits come from config', () => {

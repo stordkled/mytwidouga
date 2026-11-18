@@ -29,6 +29,20 @@
         return all.filter((source) => !source.hidden || source.id === currentId);
     }
 
+    // The source a page opens on. The one this browser saved, if it is still
+    // offered; otherwise TwiKeep; otherwise the first offered one. A saved id
+    // the server no longer has (a removed source) or a hidden one falls
+    // through to the default instead of failing.
+    const DEFAULT_SOURCE_ID = 'twikeep';
+
+    function initialSource(offered, savedId) {
+        const list = offered || [];
+        return list.find((source) => source.id === savedId)
+            || list.find((source) => source.id === DEFAULT_SOURCE_ID)
+            || list[0]
+            || null;
+    }
+
     // Merge a fresh /api/sources answer into the client list: the server's
     // hidden flag (which clears after hiddenRetryMs) wins, so a hidden
     // source comes back on an open page without a reload.
@@ -124,6 +138,8 @@
         videosUrl,
         resolveUrl,
         barSources,
+        DEFAULT_SOURCE_ID,
+        initialSource,
         mergeSourceStatus,
         needsSourceRefresh,
         SOURCES_REFRESH_MS,

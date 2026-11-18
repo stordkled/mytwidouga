@@ -7,7 +7,6 @@ const { finalizeVideos } = require('../lib/video');
 const pornhub = require('../sources/pornhub');
 const po85 = require('../sources/85po');
 const tokyomotion = require('../sources/tokyomotion');
-const missav = require('../sources/missav');
 const twivideo = require('../sources/twivideo');
 const sources = require('../sources');
 
@@ -36,10 +35,10 @@ test('playlist rewrite keeps variant and key URIs on the proxy', () => {
         'index.m3u8?token=a',
         'https://cdn.example/seg-1.ts',
     ].join('\n');
-    const rewritten = rewritePlaylist(body, 'https://cdn.example/hls/master.m3u8?token=a', 'missav');
-    assert.match(rewritten, /URI="\/proxy\/media\?source=missav&url=[^"]+key\.key"/);
-    assert.match(rewritten, /source=missav&url=[^\n]*index\.m3u8/);
-    assert.match(rewritten, /source=missav&url=[^\n]*seg-1\.ts/);
+    const rewritten = rewritePlaylist(body, 'https://cdn.example/hls/master.m3u8?token=a', 'pornhub');
+    assert.match(rewritten, /URI="\/proxy\/media\?source=pornhub&url=[^"]+key\.key"/);
+    assert.match(rewritten, /source=pornhub&url=[^\n]*index\.m3u8/);
+    assert.match(rewritten, /source=pornhub&url=[^\n]*seg-1\.ts/);
     assert.doesNotMatch(rewritten, /^index\.m3u8/m);
 });
 
@@ -192,28 +191,13 @@ test('tokyomotion cards and vsrc playback', () => {
     assert.equal(tokyomotion.getEmbedUrl({ id: '1', embedToken: token }), 'https://www.tokyomotion.net/embed/ae4cf059a153ca9875eb');
 });
 
-test('missav ranking cards', () => {
-    const html = `
-      <div class="thumbnail group">
-        <a href="https://missav.ws/ja/dldss-575">
-          <img src="https://fourhoi.com/dldss-575/cover-t.jpg" alt="題名">
-        </a>
-        <span class="absolute bottom-1">2:45:54</span>
-        <div class="my-2"><a href="https://missav.ws/ja/dldss-575">題名</a></div>
-      </div>`;
-    const videos = missav.parseListing(html, 'https://missav.ws');
-    assert.equal(videos[0].id, 'dldss-575');
-    assert.equal(videos[0].title, '題名');
-    assert.equal(videos[0].duration, '2:45:54');
-    assert.equal(videos[0].thumbUrl, 'https://fourhoi.com/dldss-575/cover-t.jpg');
-    assert.equal(videos[0].playback.kind, 'resolve');
-});
-
-test('registry exposes the seven sources and only their periods', () => {
+test('registry exposes the six sources in switcher order and only their periods', () => {
     const list = sources.list();
     assert.deepEqual(list.map((source) => source.id), [
-        'twivideo', 'pornhub', '85po', 'tokyomotion', 'missav', 'twikeep', 'twihozon',
+        'twivideo', 'twikeep', '85po', 'pornhub', 'tokyomotion', 'twihozon',
     ]);
+    assert.equal(list[0].hidden, true, 'twivideo stays hidden');
+    assert.deepEqual(list.filter((source) => !source.hidden).slice(0, 2).map((source) => source.id), ['twikeep', '85po']);
     for (const source of list) {
         assert.ok(source.periods.length >= 1);
         assert.equal(source.periods.some((period) => period.id === '3d'), false);
