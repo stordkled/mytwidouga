@@ -1,21 +1,23 @@
 const { loadHtml, cleanText, absUrl } = require('../lib/html');
-const { gotoHtml } = require('../lib/browser');
+const { getText, responseFailure } = require('../lib/http');
+const { withMirror, activeBase, playlistHostsFor, embedTemplateFor, fillTemplate } = require('../lib/mirrors');
 
-// MissAV ranking paths. The site 302s /ja/today-hot onto a rotating /dmNNN/
-// prefix, so the prefix is not hardcoded. weekly-hot and monthly-hot are the
-// other two boards; there is no 3-day board. The HTML is behind Cloudflare,
-// so listing and the watch page go through the shared browser.
+// MissAV ranking paths. /ja/today-hot redirects onto a rotating /dmNNN/ prefix,
+// so the prefix is not hardcoded. A block page tries the next base in
+// config/sources.json. Plain HTTP only: a Cloudflare challenge is a failure,
+// not something this adapter solves.
 //
-// The player builds https://surrit.com/<uuid>/playlist.m3u8. The uuid is in
-// the seek-preview URLs (and a packed script). surrit.com is on mediaHosts
-// because the playlist and its segments must be proxied with a MissAV Referer.
+// The player builds https://surrit.com/<uuid>/playlist.m3u8. Extra playlist
+// hosts belong in playlistHosts / SOURCE_PLAYLIST_HOSTS_MISSAV. No official
+// embed URL was found; set SOURCE_EMBED_MISSAV=https://host/embed/{id} to add one.
 
-const SITE_BASES = [
+const DEFAULT_BASES = [
     'https://missav.ws',
     'https://missav.ai',
     'https://missav.live',
     'https://missav123.com',
 ];
+const DEFAULT_PLAYLIST_HOSTS = ['surrit.com'];
 
 const SELECTORS = {
     card: '.thumbnail.group',
@@ -31,7 +33,9 @@ const PERIODS = {
     '30d': { label: '月間', path: '/ja/monthly-hot' },
 };
 
-let basePromise = null;
+function currentBase() {
+    return activeBase('missav') || DEFAULT_BASES[0];
+}
 
 function parseListing(html, base) {
     const root = loadHtml(html);
@@ -68,72 +72,53 @@ function parseListing(html, base) {
     return videos;
 }
 
-function extractPlaylist(html) {
-    const escaped = html.match(/surrit\.com\\?\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
-    if (escaped) return `https://surrit.com/${escaped[1]}/playlist.m3u8`;
-    const plain = html.match(/surrit\.com\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
-    if (plain) return `https://surrit.com/${plain[1]}/playlist.m3u8`;
+function extractPlaylist(html, hosts = playlistHostsFor('missav', DEFAULT_PLAYLIST_HOSTS)) {
+    const list = hosts.length ? hosts : DEFAULT_PLAYLIST_HOSTS;
+    for (const host of list) {
+        const escaped = host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const match = html.match(new RegExp(`${escaped}\\\\?/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`, 'i'));
+        if (match) return `https://${host}/${match[1]}/playlist.m3u8`;
+    }
     return null;
 }
 
-async function openRanking(base, path) {
-    const result = await gotoHtml(base + path, {
-        waitFor: SELECTORS.card,
-        challengeTimeout: 40000,
-    });
-    const videos = parseListing(result.html, base);
-    if (videos.length === 0) {
-        throw new Error(`MissAV page ${result.url} had no ${SELECTORS.card} cards.`);
-    }
-    return videos;
-}
-
-async function discoverBase() {
-    const errors = [];
-    for (const base of SITE_BASES) {
-        try {
-            const videos = await openRanking(base, PERIODS['24h'].path);
-            console.log('[missav] Using', base);
-            return { base, warmup: videos };
-        } catch (err) {
-            errors.push(`${base} (${err.message})`);
-        }
-    }
-    throw new Error(`MissAV is unreachable. Tried ${errors.join('; ')}. Domains are SITE_BASES in sources/missav.js.`);
-}
-
-function getBase() {
-    if (!basePromise) {
-        basePromise = discoverBase().catch((err) => {
-            basePromise = null;
-            throw err;
-        });
-    }
-    return basePromise;
+function getEmbedUrl(video) {
+    const template = embedTemplateFor('missav');
+    if (!template || !video) return null;
+    return fillTemplate(template, video, currentBase());
 }
 
 async function fetchRanking(periodId) {
     const period = PERIODS[periodId];
     if (!period) throw new Error(`missav has no period ${periodId}`);
-    const found = await getBase();
-    if (periodId === '24h' && found.warmup) {
-        const videos = found.warmup;
-        delete found.warmup;
+    const { result } = await withMirror('missav', DEFAULT_BASES, async (base) => {
+        const response = await getText(base + period.path, { timeout: 12000, referer: `${base}/` });
+        const failure = responseFailure(response);
+        if (failure) throw new Error(failure);
+        const videos = parseListing(response.text, base);
+        if (videos.length === 0) throw new Error('no ranking cards');
         return videos;
-    }
-    return openRanking(found.base, period.path);
+    });
+    return result;
 }
 
 async function resolvePlayback(id) {
     if (!/^[a-z0-9-]+$/i.test(id)) throw new Error('Invalid MissAV video id');
-    const found = await getBase();
-    const pageUrl = `${found.base}/ja/${id}`;
-    const result = await gotoHtml(pageUrl, { challengeTimeout: 40000 });
-    const playlist = extractPlaylist(result.html);
-    if (!playlist) {
-        throw new Error('MissAV watch page had no surrit.com playlist id. Update extractPlaylist in sources/missav.js.');
+    const embedUrl = getEmbedUrl({ id });
+    try {
+        const { result } = await withMirror('missav', DEFAULT_BASES, async (base) => {
+            const response = await getText(`${base}/ja/${id}`, { timeout: 12000, referer: `${base}/` });
+            const failure = responseFailure(response);
+            if (failure) throw new Error(failure);
+            const playlist = extractPlaylist(response.text);
+            if (!playlist) throw new Error('no playlist id');
+            return { playlist, referer: `${base}/` };
+        });
+        return { kind: 'hls', url: result.playlist, embedUrl, referer: result.referer };
+    } catch (err) {
+        if (!embedUrl) throw err;
+        return { kind: 'embed', url: embedUrl, embedUrl, referer: `${currentBase()}/` };
     }
-    return { kind: 'hls', url: playlist, referer: found.base + '/' };
 }
 
 module.exports = {
@@ -141,6 +126,8 @@ module.exports = {
     name: 'MissAV',
     color: '#7c5cff',
     homepage: 'https://missav.ws/',
+    bases: DEFAULT_BASES,
+    playlistHosts: DEFAULT_PLAYLIST_HOSTS,
     periods: Object.entries(PERIODS).map(([id, period]) => ({ id, label: period.label })),
     mediaHosts: [
         'missav.ws',
@@ -151,14 +138,15 @@ module.exports = {
         'surrit.com',
         'fourhoi.com',
     ],
-    mediaReferer: 'https://missav.ws/',
-    cacheTtlMs: 10 * 60 * 1000,
-    timeoutMs: 50000,
+    get mediaReferer() {
+        return `${currentBase()}/`;
+    },
+    timeoutMs: 60000,
     fetchRanking,
     resolvePlayback,
+    getEmbedUrl,
     parseListing,
     extractPlaylist,
     SELECTORS,
     PERIODS,
-    SITE_BASES,
 };

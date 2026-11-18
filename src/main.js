@@ -23,7 +23,7 @@ let lastTapTime = 0;
 let loadController = null;
 let playToken = 0;
 let activePlay = -1;
-const RESOLVE_TTL_MS = 90 * 1000;
+const RESOLVE_TTL_MS = 3 * 60 * 1000;
 const resolvedCache = new Map();
 
 function mediaProxy(sourceId, url) {
@@ -229,6 +229,11 @@ function stopCard(card) {
     }
     const frame = card.querySelector('iframe.embed-player');
     if (frame) frame.remove();
+    card.classList.remove('embed-shield', 'embed-interactive');
+    const exit = card.querySelector('.embed-exit');
+    if (exit) exit.remove();
+    const hint = card.querySelector('.embed-hint');
+    if (hint) hint.remove();
     const overlay = card.querySelector('.play-pause-overlay');
     if (overlay) overlay.style.display = '';
     const progress = card.querySelector('.video-progress');
@@ -304,6 +309,7 @@ async function resolvePlayback(video) {
         }
         throw new Error(data.error || '再生情報を取得できませんでした');
     }
+    if (data.playback.embedUrl) video.playback.embedUrl = data.playback.embedUrl;
     rememberPlayback(video, data.playback);
     return data.playback;
 }
@@ -339,8 +345,29 @@ function mountEmbed(card, embedUrl) {
         wrapper.appendChild(frame);
     }
     if (frame.src !== embedUrl) frame.src = embedUrl;
+    card.classList.add('embed-shield');
+    card.classList.remove('embed-interactive');
     const overlay = card.querySelector('.play-pause-overlay');
-    if (overlay) overlay.style.display = 'none';
+    if (overlay) {
+        overlay.style.display = '';
+        if (!overlay.querySelector('.embed-hint')) {
+            const hint = document.createElement('div');
+            hint.className = 'embed-hint';
+            hint.textContent = 'スワイプで移動 · タップで操作';
+            overlay.appendChild(hint);
+        }
+    }
+    if (!card.querySelector('.embed-exit')) {
+        const exit = document.createElement('button');
+        exit.type = 'button';
+        exit.className = 'embed-exit';
+        exit.textContent = 'スワイプに戻す';
+        exit.addEventListener('click', (event) => {
+            event.stopPropagation();
+            card.classList.remove('embed-interactive');
+        });
+        card.appendChild(exit);
+    }
     const progress = card.querySelector('.video-progress');
     if (progress) progress.style.display = 'none';
 }
@@ -494,6 +521,11 @@ function updateAllMuteState() {
 function setupEventListeners() {
     videoFeed.querySelectorAll('.play-pause-overlay').forEach((overlay) => {
         overlay.addEventListener('click', (event) => {
+            const card = overlay.closest('.video-card');
+            if (card && card.classList.contains('embed-shield')) {
+                card.classList.add('embed-interactive');
+                return;
+            }
             const now = Date.now();
             const index = Number(overlay.dataset.index);
             if (now - lastTapTime < 400) {

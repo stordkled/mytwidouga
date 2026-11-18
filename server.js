@@ -61,6 +61,7 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 200, {
             browser: browserStatus(),
             sources: sources.list(),
+            domains: sources.domainStatus(),
             timestamp: new Date().toISOString(),
         });
         return;
@@ -112,7 +113,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/proxy/media') {
         const sourceId = url.searchParams.get('source') || '';
         const targetUrl = url.searchParams.get('url') || '';
-        const source = sources.get(sourceId);
+        const source = sources.proxyView(sourceId);
         if (!source || !targetUrl) {
             res.writeHead(400);
             res.end('Bad Request');

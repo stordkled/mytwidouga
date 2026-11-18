@@ -1,5 +1,6 @@
 const { loadHtml, cleanText, absUrl } = require('../lib/html');
-const { getText } = require('../lib/http');
+const { getText, responseFailure } = require('../lib/http');
+const { withMirror, activeBase, embedTemplateFor, fillTemplate } = require('../lib/mirrors');
 
 // TokyoMotion's video list is /videos. o=mv is "most viewed" and t=t|w|m limits
 // that to videos added today / this week / this month (the site has no separate
@@ -7,7 +8,12 @@ const { getText } = require('../lib/http');
 // same-origin /vsrc/... MP4 that 301s to wwwNN.tokyomotion.net. Both hosts are
 // covered by mediaHosts.
 
-const ORIGIN = 'https://www.tokyomotion.net';
+const DEFAULT_BASES = ['https://www.tokyomotion.net'];
+const ORIGIN = DEFAULT_BASES[0];
+
+function currentBase() {
+    return activeBase('tokyomotion') || ORIGIN;
+}
 
 const SELECTORS = {
     card: 'a.thumb-popu',
@@ -23,11 +29,11 @@ const PERIODS = {
     '30d': { label: '今月', query: 'o=mv&t=m' },
 };
 
-function parseListing(html) {
+function parseListing(html, base = ORIGIN) {
     const root = loadHtml(html);
     const videos = [];
     for (const link of root.querySelectorAll(SELECTORS.card)) {
-        const href = absUrl(link.getAttribute('href'), ORIGIN + '/');
+        const href = absUrl(link.getAttribute('href'), base + '/');
         const idMatch = href.match(/\/video\/(\d+)/);
         if (!idMatch) continue;
         const card = link.parentNode || link;
@@ -36,7 +42,7 @@ function parseListing(html) {
             id: idMatch[1],
             title: cleanText(link.querySelector(SELECTORS.title)?.text || img?.getAttribute('alt')),
             pageUrl: href,
-            thumbUrl: absUrl(img?.getAttribute('src'), ORIGIN + '/'),
+            thumbUrl: absUrl(img?.getAttribute('src'), base + '/'),
             duration: cleanText(link.querySelector(SELECTORS.duration)?.text),
             views: cleanText(card.querySelector?.(SELECTORS.views)?.text || ''),
             externalUrl: href,
@@ -49,11 +55,11 @@ function parseListing(html) {
     return videos;
 }
 
-function parsePlayback(html) {
+function parsePlayback(html, base = ORIGIN) {
     const root = loadHtml(html);
     const playable = root.querySelectorAll('video source')
         .map((source) => ({
-            src: absUrl(source.getAttribute('src'), ORIGIN + '/'),
+            src: absUrl(source.getAttribute('src'), base + '/'),
             label: (source.getAttribute('title') || '').toLowerCase(),
             type: (source.getAttribute('type') || '').toLowerCase(),
         }))
@@ -62,31 +68,47 @@ function parsePlayback(html) {
     return best ? best.src : null;
 }
 
+function parseEmbedToken(html) {
+    const match = html.match(/\/embed\/([a-f0-9]{8,})/i);
+    return match ? match[1] : null;
+}
+
+function getEmbedUrl(video) {
+    const template = embedTemplateFor('tokyomotion');
+    const base = currentBase();
+    if (template) return fillTemplate(template, video, base);
+    if (!video || !video.embedToken) return null;
+    return `${base}/embed/${video.embedToken}`;
+}
+
 async function fetchRanking(periodId) {
     const period = PERIODS[periodId];
     if (!period) throw new Error(`tokyomotion has no period ${periodId}`);
-    const url = `${ORIGIN}/videos?${period.query}`;
-    const response = await getText(url, { timeout: 20000, referer: ORIGIN + '/' });
-    if (!response.ok || response.blocked) {
-        throw new Error(`TokyoMotion ranking failed (${response.status}).`);
-    }
-    const videos = parseListing(response.text);
-    if (videos.length === 0) {
-        throw new Error('TokyoMotion returned no a.thumb-popu cards. Update SELECTORS in sources/tokyomotion.js.');
-    }
-    return videos;
+    const { result } = await withMirror('tokyomotion', DEFAULT_BASES, async (base) => {
+        const response = await getText(`${base}/videos?${period.query}`, { timeout: 12000, referer: `${base}/` });
+        const failure = responseFailure(response);
+        if (failure) throw new Error(failure);
+        const videos = parseListing(response.text, base);
+        if (videos.length === 0) throw new Error('no ranking cards');
+        return videos;
+    });
+    return result;
 }
 
 async function resolvePlayback(id) {
     if (!/^\d+$/.test(id)) throw new Error('Invalid TokyoMotion video id');
-    const pageUrl = `${ORIGIN}/video/${id}`;
-    const response = await getText(pageUrl, { timeout: 20000, referer: ORIGIN + '/videos' });
-    if (!response.ok || response.blocked) {
-        throw new Error(`TokyoMotion video page failed (${response.status}).`);
-    }
-    const url = parsePlayback(response.text);
-    if (!url) throw new Error('TokyoMotion video page had no <video><source>. Update parsePlayback in sources/tokyomotion.js.');
-    return { kind: 'file', url, referer: response.url || pageUrl };
+    const { base, result } = await withMirror('tokyomotion', DEFAULT_BASES, async (base) => {
+        const response = await getText(`${base}/video/${id}`, { timeout: 12000, referer: `${base}/videos` });
+        const failure = responseFailure(response);
+        if (failure) throw new Error(failure);
+        const url = parsePlayback(response.text, base);
+        const embedToken = parseEmbedToken(response.text);
+        if (!url && !embedToken) throw new Error('no media or embed token');
+        return { url, embedToken };
+    });
+    const embedUrl = getEmbedUrl({ id, embedToken: result.embedToken });
+    if (!result.url) return { kind: 'embed', url: embedUrl, embedUrl, referer: `${base}/` };
+    return { kind: 'file', url: result.url, embedUrl, referer: `${base}/` };
 }
 
 module.exports = {
@@ -94,15 +116,19 @@ module.exports = {
     name: 'TokyoMotion',
     color: '#ff7a18',
     homepage: ORIGIN + '/',
+    bases: DEFAULT_BASES,
     periods: Object.entries(PERIODS).map(([id, period]) => ({ id, label: period.label })),
     mediaHosts: ['tokyomotion.net', 'tokyo-motion.net'],
-    mediaReferer: ORIGIN + '/',
-    cacheTtlMs: 10 * 60 * 1000,
-    timeoutMs: 25000,
+    get mediaReferer() {
+        return `${currentBase()}/`;
+    },
+    timeoutMs: 60000,
     fetchRanking,
     resolvePlayback,
+    getEmbedUrl,
     parseListing,
     parsePlayback,
+    parseEmbedToken,
     SELECTORS,
     PERIODS,
 };

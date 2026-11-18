@@ -1,6 +1,6 @@
 const { loadHtml, cleanText, absUrl } = require('../lib/html');
-const { getText } = require('../lib/http');
-const { gotoHtml } = require('../lib/browser');
+const { getText, responseFailure } = require('../lib/http');
+const { withMirror, activeBase, embedTemplateFor, fillTemplate } = require('../lib/mirrors');
 
 // Most-viewed boards. Pornhub's public listing is /video?o=mv with t=t|w|m
 // (today / week / month). There is no 3-day board. Logged-out sessions in some
@@ -11,7 +11,12 @@ const { gotoHtml } = require('../lib/browser');
 // Playback is resolved per video from mediaDefinitions on the watch page,
 // which is HLS on *.phncdn.com. embedUrl is the iframe fallback.
 
-const ORIGIN = 'https://www.pornhub.com';
+const DEFAULT_BASES = [
+    'https://www.pornhub.com',
+    'https://jp.pornhub.com',
+    'https://rt.pornhub.com',
+];
+const ORIGIN = DEFAULT_BASES[0];
 
 // ja Accept-Language redirects onto jp.pornhub.com, whose mediaDefinitions
 // point at hv-h.phncdn.com URLs that return 410. en-US stays on www and
@@ -31,10 +36,14 @@ const SELECTORS = {
 };
 
 const PERIODS = {
-    '24h': { label: '24時間', url: `${ORIGIN}/video?o=mv&t=t` },
-    '7d': { label: '1週間', url: `${ORIGIN}/video?o=mv&t=w` },
-    '30d': { label: '1ヶ月', url: `${ORIGIN}/video?o=mv&t=m` },
+    '24h': { label: '24時間', query: 't=t' },
+    '7d': { label: '1週間', query: 't=w' },
+    '30d': { label: '1ヶ月', query: 't=m' },
 };
+
+function currentBase() {
+    return activeBase('pornhub') || ORIGIN;
+}
 
 function listingIsRanking(html, finalUrl) {
     let path = '';
@@ -48,7 +57,7 @@ function listingIsRanking(html, finalUrl) {
     return html.includes('pcVideoListItem');
 }
 
-function parseListing(html) {
+function parseListing(html, base = ORIGIN) {
     const root = loadHtml(html);
     const videos = [];
     for (const card of root.querySelectorAll(SELECTORS.card)) {
@@ -67,16 +76,15 @@ function parseListing(html) {
         videos.push({
             id: vkey,
             title,
-            pageUrl: `${ORIGIN}/view_video.php?viewkey=${encodeURIComponent(vkey)}`,
-            thumbUrl: absUrl(thumb, ORIGIN + '/'),
+            pageUrl: `${base}/view_video.php?viewkey=${encodeURIComponent(vkey)}`,
+            thumbUrl: absUrl(thumb, base + '/'),
             duration: cleanText(card.querySelector(SELECTORS.duration)?.text),
             views: cleanText(card.querySelector(SELECTORS.views)?.text),
             author: cleanText(card.querySelector(SELECTORS.author)?.text),
-            externalUrl: `${ORIGIN}/view_video.php?viewkey=${encodeURIComponent(vkey)}`,
+            externalUrl: `${base}/view_video.php?viewkey=${encodeURIComponent(vkey)}`,
             playback: {
                 kind: 'resolve',
-                embedUrl: `${ORIGIN}/embed/${encodeURIComponent(vkey)}`,
-                referer: ORIGIN + '/',
+                referer: base + '/',
             },
         });
     }
@@ -120,65 +128,58 @@ function pickMedia(definitions) {
     return null;
 }
 
-async function acceptAge(page) {
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-    await page.setCookie({
-        name: 'accessAgeDisclaimerPH',
-        value: '2',
-        domain: '.pornhub.com',
-        path: '/',
-        secure: true,
-    });
-}
-
-async function fetchListing(url) {
-    const httpResult = await getText(url, {
-        timeout: 20000,
-        headers: PAGE_HEADERS,
-        referer: ORIGIN + '/',
-    });
-    if (listingIsRanking(httpResult.text, httpResult.url)) {
-        return httpResult.text;
-    }
-    const browserResult = await gotoHtml(url, {
-        prepare: acceptAge,
-        waitFor: SELECTORS.card,
-        challengeTimeout: 20000,
-    });
-    if (listingIsRanking(browserResult.html, browserResult.url)) {
-        return browserResult.html;
-    }
-    throw new Error(
-        'Pornhub redirected to the safe-for-work homepage instead of the most-viewed board. '
-        + 'This network cannot open /video?o=mv. Card selectors are SELECTORS in sources/pornhub.js.'
-    );
+function getEmbedUrl(video) {
+    const template = embedTemplateFor('pornhub');
+    const base = currentBase();
+    if (template) return fillTemplate(template, video, base);
+    if (!video || !/^[a-zA-Z0-9]+$/.test(String(video.id || ''))) return null;
+    return `${base}/embed/${video.id}`;
 }
 
 async function fetchRanking(periodId) {
     const period = PERIODS[periodId];
     if (!period) throw new Error(`pornhub has no period ${periodId}`);
-    const html = await fetchListing(period.url);
-    const videos = parseListing(html);
-    if (videos.length === 0) {
-        throw new Error('Pornhub ranking page had no pcVideoListItem cards. Update SELECTORS in sources/pornhub.js.');
-    }
-    return videos;
+    const { result } = await withMirror('pornhub', DEFAULT_BASES, async (base) => {
+        const url = `${base}/video?o=mv&${period.query}`;
+        const response = await getText(url, {
+            timeout: 12000,
+            headers: PAGE_HEADERS,
+            referer: `${base}/`,
+        });
+        const failure = responseFailure(response);
+        if (failure) throw new Error(failure);
+        if (!listingIsRanking(response.text, response.url)) {
+            throw new Error('redirected away from the ranking');
+        }
+        const videos = parseListing(response.text, base);
+        if (videos.length === 0) throw new Error('no ranking cards');
+        return videos;
+    });
+    return result;
 }
 
 async function resolvePlayback(id) {
     if (!/^[a-zA-Z0-9]+$/.test(id)) throw new Error('Invalid Pornhub video id');
-    const pageUrl = `${ORIGIN}/view_video.php?viewkey=${id}`;
-    const embedUrl = `${ORIGIN}/embed/${id}`;
-    const response = await getText(pageUrl, {
-        timeout: 20000,
-        headers: PAGE_HEADERS,
-        referer: ORIGIN + '/',
-    });
-    const media = pickMedia(extractMediaDefinitions(response.text));
-    if (!media) {
-        return { kind: 'embed', url: embedUrl, embedUrl, referer: ORIGIN + '/' };
+    const embedUrl = getEmbedUrl({ id });
+    try {
+        const { result } = await withMirror('pornhub', DEFAULT_BASES, async (base) => {
+            const pageUrl = `${base}/view_video.php?viewkey=${id}`;
+            const response = await getText(pageUrl, {
+                timeout: 12000,
+                headers: PAGE_HEADERS,
+                referer: `${base}/`,
+            });
+            const failure = responseFailure(response);
+            if (failure) throw new Error(failure);
+            const media = pickMedia(extractMediaDefinitions(response.text));
+            if (!media) throw new Error('no mediaDefinitions');
+            return media;
+        });
+        return { kind: result.kind, url: result.url, embedUrl, referer: `${currentBase()}/` };
+    } catch (err) {
+        if (!embedUrl) throw err;
+        return { kind: 'embed', url: embedUrl, embedUrl, referer: `${currentBase()}/` };
     }
-    return { kind: media.kind, url: media.url, embedUrl, referer: ORIGIN + '/' };
 }
 
 module.exports = {
@@ -186,13 +187,16 @@ module.exports = {
     name: 'Pornhub',
     color: '#ff9900',
     homepage: ORIGIN + '/',
+    bases: DEFAULT_BASES,
     periods: Object.entries(PERIODS).map(([id, period]) => ({ id, label: period.label })),
     mediaHosts: ['pornhub.com', 'phncdn.com', 'phprcdn.com', 'ypncdn.com'],
-    mediaReferer: ORIGIN + '/',
-    cacheTtlMs: 10 * 60 * 1000,
-    timeoutMs: 40000,
+    get mediaReferer() {
+        return `${currentBase()}/`;
+    },
+    timeoutMs: 60000,
     fetchRanking,
     resolvePlayback,
+    getEmbedUrl,
     parseListing,
     listingIsRanking,
     extractMediaDefinitions,

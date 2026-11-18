@@ -227,7 +227,53 @@ body {
     align-items: center;
     justify-content: center;
     cursor: pointer;
+    touch-action: pan-y;
     -webkit-tap-highlight-color: transparent;
+}
+
+.video-card.embed-interactive .play-pause-overlay {
+    pointer-events: none;
+}
+
+.embed-hint {
+    position: absolute;
+    left: 16px;
+    right: 88px;
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 72px);
+    z-index: 6;
+    padding: 8px 12px;
+    border-radius: var(--radius-full);
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+    pointer-events: none;
+}
+
+.video-card.embed-interactive .embed-hint {
+    display: none;
+}
+
+.embed-exit {
+    display: none;
+    position: absolute;
+    top: calc(var(--source-bar-height) + var(--note-height) + 12px);
+    right: 16px;
+    z-index: 30;
+    border: 0;
+    border-radius: var(--radius-full);
+    padding: 8px 12px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.video-card.embed-interactive .embed-exit {
+    display: block;
 }
 
 .play-icon {

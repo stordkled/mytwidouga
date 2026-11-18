@@ -1,5 +1,6 @@
 const { loadHtml, cleanText, absUrl } = require('../lib/html');
-const { getText, looksBlocked } = require('../lib/http');
+const { getText, responseFailure } = require('../lib/http');
+const { withMirror, activeBase, embedTemplateFor, fillTemplate } = require('../lib/mirrors');
 
 // 85po is a KVS site. The popular board is /ja/most-popular/ and the period
 // switch is an async block, not a plain query string (the full page ignores
@@ -10,9 +11,8 @@ const { getText, looksBlocked } = require('../lib/http');
 // MP4s that redirect to a CDN (ppxdd.com as of 2026-11); keep that host in
 // mediaHosts if the CDN changes.
 
-const SITE_BASES = [
+const DEFAULT_BASES = [
     'https://www.85po.com',
-    'https://85po.com',
     'https://www.85po.net',
     'https://www.85ro.com',
 ];
@@ -34,8 +34,9 @@ const PERIODS = {
 
 const BLOCK_ID = 'list_videos_common_videos_list';
 
-let basePromise = null;
-let activeReferer = 'https://www.85po.net/';
+function currentBase() {
+    return activeBase('85po') || 'https://www.85po.net';
+}
 
 function parseListing(html, base) {
     const root = loadHtml(html);
@@ -78,65 +79,42 @@ function pickMp4(html) {
         || null;
 }
 
-async function discoverBase() {
-    const errors = [];
-    for (const base of SITE_BASES) {
-        try {
-            const response = await getText(`${base}/ja/most-popular/`, { timeout: 12000 });
-            const usable = response.status === 200
-                && !response.blocked
-                && !looksBlocked(response.text)
-                && response.text.includes(BLOCK_ID);
-            if (usable) {
-                activeReferer = base + '/';
-                console.log('[85po] Using', base);
-                return base;
-            }
-            errors.push(`${base} (${response.status}${response.blocked ? ', blocked' : ''})`);
-        } catch (err) {
-            errors.push(`${base} (${err.message})`);
-        }
-    }
-    throw new Error(`85po is unreachable. Tried ${errors.join('; ')}.`);
-}
-
-function getBase() {
-    if (!basePromise) {
-        basePromise = discoverBase().catch((err) => {
-            basePromise = null;
-            throw err;
-        });
-    }
-    return basePromise;
+function getEmbedUrl(video) {
+    const template = embedTemplateFor('85po');
+    const base = currentBase();
+    if (template) return fillTemplate(template, video, base);
+    if (!video || !/^\d+$/.test(String(video.id || ''))) return null;
+    return `${base}/embed/${video.id}/`;
 }
 
 async function fetchRanking(periodId) {
     const period = PERIODS[periodId];
     if (!period) throw new Error(`85po has no period ${periodId}`);
-    const base = await getBase();
-    const url = `${base}/ja/most-popular/?mode=async&function=get_block&block_id=${BLOCK_ID}&sort_by=${period.sort}`;
-    const response = await getText(url, { timeout: 20000, referer: `${base}/ja/most-popular/` });
-    if (!response.ok || response.blocked) {
-        throw new Error(`85po ranking request failed (${response.status}).`);
-    }
-    const videos = parseListing(response.text, base);
-    if (videos.length === 0) {
-        throw new Error('85po returned no .item cards. Update SELECTORS in sources/85po.js.');
-    }
-    return videos;
+    const { result } = await withMirror('85po', DEFAULT_BASES, async (base) => {
+        const url = `${base}/ja/most-popular/?mode=async&function=get_block&block_id=${BLOCK_ID}&sort_by=${period.sort}`;
+        const response = await getText(url, { timeout: 12000, referer: `${base}/ja/most-popular/` });
+        const failure = responseFailure(response);
+        if (failure) throw new Error(failure);
+        const videos = parseListing(response.text, base);
+        if (videos.length === 0) throw new Error('no ranking cards');
+        return videos;
+    });
+    return result;
 }
 
 async function resolvePlayback(id) {
     if (!/^\d+$/.test(id)) throw new Error('Invalid 85po video id');
-    const base = await getBase();
-    const pageUrl = `${base}/ja/v/${id}.html`;
-    const response = await getText(pageUrl, { timeout: 20000, referer: `${base}/ja/most-popular/` });
-    if (!response.ok || response.blocked) {
-        throw new Error(`85po video page failed (${response.status}).`);
-    }
-    const url = pickMp4(response.text);
-    if (!url) throw new Error('85po video page had no get_file MP4. Update pickMp4 in sources/85po.js.');
-    return { kind: 'file', url, referer: pageUrl };
+    const { base, result } = await withMirror('85po', DEFAULT_BASES, async (base) => {
+        const pageUrl = `${base}/ja/v/${id}.html`;
+        const response = await getText(pageUrl, { timeout: 12000, referer: `${base}/ja/most-popular/` });
+        const failure = responseFailure(response);
+        if (failure) throw new Error(failure);
+        const url = pickMp4(response.text);
+        if (!url) throw new Error('no get_file MP4');
+        return { url, pageUrl };
+    });
+    const embedUrl = getEmbedUrl({ id });
+    return { kind: 'file', url: result.url, embedUrl, referer: result.pageUrl || `${base}/` };
 }
 
 module.exports = {
@@ -145,17 +123,17 @@ module.exports = {
     color: '#ff4d6d',
     homepage: 'https://www.85po.com/',
     periods: Object.entries(PERIODS).map(([id, period]) => ({ id, label: period.label })),
+    bases: DEFAULT_BASES,
     mediaHosts: ['85po.com', '85po.net', '85ro.com', 'ppxdd.com'],
     get mediaReferer() {
-        return activeReferer;
+        return `${currentBase()}/`;
     },
-    cacheTtlMs: 10 * 60 * 1000,
-    timeoutMs: 25000,
+    timeoutMs: 60000,
     fetchRanking,
     resolvePlayback,
+    getEmbedUrl,
     parseListing,
     pickMp4,
     SELECTORS,
     PERIODS,
-    SITE_BASES,
 };

@@ -83,7 +83,7 @@ test('pornhub listing parser and safe-for-work guard', () => {
     assert.equal(videos[0].id, 'abc123');
     assert.equal(videos[0].title, 'Sample title');
     assert.equal(videos[0].playback.kind, 'resolve');
-    assert.equal(videos[0].playback.embedUrl, 'https://www.pornhub.com/embed/abc123');
+    assert.equal(pornhub.getEmbedUrl(videos[0]), 'https://www.pornhub.com/embed/abc123');
     assert.equal(pornhub.listingIsRanking(html, 'https://www.pornhub.com/video?o=mv&t=t'), true);
     assert.equal(pornhub.listingIsRanking(html + 'pageKeyStat = "sfw_homepage"', 'https://www.pornhub.com/video?o=mv&t=t'), false);
     assert.equal(pornhub.listingIsRanking(html, 'https://jp.pornhub.com/'), false);
@@ -139,6 +139,9 @@ test('tokyomotion cards and vsrc playback', () => {
         <source src="https://www.tokyomotion.net/vsrc/hd/token" title="HD" type="video/mp4">
       </video>`);
     assert.equal(media, 'https://www.tokyomotion.net/vsrc/hd/token');
+    const token = tokyomotion.parseEmbedToken('<iframe src="https://www.tokyomotion.net/embed/ae4cf059a153ca9875eb"></iframe>');
+    assert.equal(token, 'ae4cf059a153ca9875eb');
+    assert.equal(tokyomotion.getEmbedUrl({ id: '1', embedToken: token }), 'https://www.tokyomotion.net/embed/ae4cf059a153ca9875eb');
 });
 
 test('missav cards and surrit playlist id', () => {

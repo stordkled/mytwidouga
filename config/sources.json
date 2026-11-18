@@ -1,0 +1,38 @@
+{
+  "cacheTtlMs": 1800000,
+  "resolveTtlMs": 180000,
+  "domainMemoryTtlMs": 1800000,
+  "mirrorTimeoutMs": 12000,
+  "requestTimeoutMs": 60000,
+  "sources": {
+    "twivideo": {
+      "bases": ["https://twivideo.net"]
+    },
+    "pornhub": {
+      "bases": [
+        "https://www.pornhub.com",
+        "https://jp.pornhub.com",
+        "https://rt.pornhub.com"
+      ]
+    },
+    "85po": {
+      "bases": [
+        "https://www.85po.com",
+        "https://www.85po.net",
+        "https://www.85ro.com"
+      ]
+    },
+    "tokyomotion": {
+      "bases": ["https://www.tokyomotion.net"]
+    },
+    "missav": {
+      "bases": [
+        "https://missav.ws",
+        "https://missav.ai",
+        "https://missav.live",
+        "https://missav123.com"
+      ],
+      "playlistHosts": ["surrit.com"]
+    }
+  }
+}
