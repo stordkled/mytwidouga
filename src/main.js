@@ -23,6 +23,7 @@ let lastTapTime = 0;
 let loadController = null;
 let playToken = 0;
 let activePlay = -1;
+const RESOLVE_TTL_MS = 90 * 1000;
 const resolvedCache = new Map();
 
 function mediaProxy(sourceId, url) {
@@ -270,9 +271,31 @@ function startProgressTracking(media, index) {
     requestAnimationFrame(update);
 }
 
+function resolvedKey(video) {
+    return `${currentSource.id}:${video.id}`;
+}
+
+function cachedPlayback(video) {
+    const hit = resolvedCache.get(resolvedKey(video));
+    if (!hit) return null;
+    if (hit.expires <= Date.now()) {
+        resolvedCache.delete(resolvedKey(video));
+        return null;
+    }
+    return hit.playback;
+}
+
+function rememberPlayback(video, playback) {
+    resolvedCache.set(resolvedKey(video), { playback, expires: Date.now() + RESOLVE_TTL_MS });
+}
+
+function forgetPlayback(video) {
+    if (video && currentSource) resolvedCache.delete(resolvedKey(video));
+}
+
 async function resolvePlayback(video) {
-    const key = `${currentSource.id}:${video.id}`;
-    if (resolvedCache.has(key)) return resolvedCache.get(key);
+    const cached = cachedPlayback(video);
+    if (cached) return cached;
     const response = await fetch(`/api/resolve?source=${encodeURIComponent(currentSource.id)}&id=${encodeURIComponent(video.id)}`);
     const data = await response.json();
     if (!data.ok || !data.playback) {
@@ -281,8 +304,25 @@ async function resolvePlayback(video) {
         }
         throw new Error(data.error || '再生情報を取得できませんでした');
     }
-    resolvedCache.set(key, data.playback);
+    rememberPlayback(video, data.playback);
     return data.playback;
+}
+
+function failDirectPlayback(card, index, embedUrl, message) {
+    forgetPlayback(videos[index]);
+    activePlay = -1;
+    const media = card.querySelector('video');
+    if (media) {
+        media.onerror = null;
+        media.removeAttribute('src');
+        media.load();
+    }
+    if (embedUrl) {
+        mountEmbed(card, embedUrl);
+        return;
+    }
+    showCardMessage(card, message);
+    showPlayIcon(index, true, true);
 }
 
 function mountEmbed(card, embedUrl) {
@@ -317,12 +357,12 @@ function mountFile(card, index, url) {
     startProgressTracking(media, index);
     media.onerror = () => {
         const embedUrl = videos[index] && videos[index].playback.embedUrl;
-        if (embedUrl) {
-            showCardMessage(card, '直接再生できないため、埋め込みプレイヤーに切り替えます');
-            mountEmbed(card, embedUrl);
-        } else {
-            showCardMessage(card, 'この動画を再生できませんでした');
-        }
+        failDirectPlayback(
+            card,
+            index,
+            embedUrl,
+            embedUrl ? '直接再生できないため、埋め込みプレイヤーに切り替えます' : 'この動画を再生できませんでした'
+        );
     };
 }
 
@@ -335,12 +375,12 @@ function mountHls(card, index, url) {
             card._hls.destroy();
             card._hls = null;
         }
-        if (embedUrl) {
-            showCardMessage(card, 'HLSを再生できないため、埋め込みプレイヤーに切り替えます');
-            mountEmbed(card, embedUrl);
-        } else {
-            showCardMessage(card, 'この動画を再生できませんでした');
-        }
+        failDirectPlayback(
+            card,
+            index,
+            embedUrl,
+            embedUrl ? 'HLSを再生できないため、埋め込みプレイヤーに切り替えます' : 'この動画を再生できませんでした'
+        );
     };
 
     if (media.canPlayType('application/vnd.apple.mpegurl')) {
