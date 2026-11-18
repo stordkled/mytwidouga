@@ -72,8 +72,10 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
+    // Leave API and media relays to the browser. Piping a <video> Range
+    // request through the worker makes Chrome re-download the rest of a
+    // progressive file on every reconnect, which locks the renderer.
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/proxy/')) {
-        event.respondWith(fetch(event.request));
         return;
     }
 

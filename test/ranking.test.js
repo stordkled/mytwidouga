@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { resolvePeriod } = require('../lib/periods');
-const { rewritePlaylist, hostAllowed, isPublicHttpUrl } = require('../lib/proxy');
+const { rewritePlaylist, hostAllowed, isPublicHttpUrl, boundMediaRange } = require('../lib/proxy');
 const { modesFor } = require('../lib/playback');
 const { finalizeVideos } = require('../lib/video');
 const pornhub = require('../sources/pornhub');
@@ -77,6 +77,10 @@ test('proxy allowlist is per host suffix and rejects private targets', () => {
     assert.equal(isPublicHttpUrl('http://127.0.0.1/secret'), false);
     assert.equal(isPublicHttpUrl('http://169.254.169.254/latest'), false);
     assert.equal(isPublicHttpUrl('file:///etc/passwd'), false);
+    assert.equal(boundMediaRange('bytes=0-'), 'bytes=0-2097151');
+    assert.equal(boundMediaRange('bytes=5000000-'), 'bytes=5000000-7097151');
+    assert.equal(boundMediaRange('bytes=0-100'), 'bytes=0-100');
+    assert.equal(boundMediaRange(''), 'bytes=0-2097151');
 });
 
 test('twivideo cards become direct files', () => {
@@ -134,6 +138,8 @@ test('pornhub listing parser and safe-for-work guard', () => {
     assert.equal(pornhub.choosePlayable(directFile, hls), directFile);
     assert.equal(pornhub.choosePlayable(lockedFile, hls).kind, 'file');
     assert.equal(pornhub.choosePlayable(null, hls), hls);
+    assert.equal(pornhub.urlIsIpBound('https://ev.phncdn.com/a.mp4?ip=203.0.113.5&ipa=1'), true);
+    assert.equal(pornhub.urlIsIpBound('https://ev-h.phncdn.com/a.m3u8?validfrom=1'), false);
 });
 
 test('85po popular cards and mp4 picker', () => {

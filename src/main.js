@@ -76,6 +76,12 @@ function playlistProxy(sourceId, url) {
     return `/proxy/playlist?source=${encodeURIComponent(sourceId)}&url=${encodeURIComponent(url)}`;
 }
 
+function playbackNeedsProxy(playback) {
+    if (!playback) return false;
+    if (playback.needsReferer) return true;
+    return /[?&](?:ip|ipa)=/i.test(playback.url || '');
+}
+
 function modesFor(mode, hls, needsReferer) {
     if (mode === 'embed') return ['embed'];
     const start = !mode || mode === 'auto' ? 0 : PLAYBACK_LADDER.indexOf(mode);
@@ -258,20 +264,20 @@ function createVideoCard(video, index) {
     });
     media.addEventListener('ended', () => {
         if (media.dataset.rewinding === '1') return;
+        if (!Number.isFinite(media.duration) || media.duration < 1) return;
+        if (media.currentTime + 0.75 < media.duration) return;
         media.dataset.rewinding = '1';
         const resume = () => {
             media.dataset.rewinding = '';
             const playPromise = media.play();
             if (playPromise) playPromise.catch(() => {});
         };
+        media.addEventListener('seeked', resume, { once: true });
         try {
             media.currentTime = 0;
         } catch {
             media.dataset.rewinding = '';
-            return;
         }
-        if (media.currentTime < 0.05) resume();
-        else media.addEventListener('seeked', resume, { once: true });
     });
 
     if (index === 0) {
@@ -628,7 +634,7 @@ async function playCard(index) {
     }
     if (token !== playToken || currentVideoIndex !== index) return;
 
-    let modes = modesFor(forced, isHls(playback), playback && playback.needsReferer);
+    let modes = modesFor(forced, isHls(playback), playbackNeedsProxy(playback));
     const known = sourceStrategy.get(currentSource.id);
     if (known && !playback.needsReferer) {
         const at = modes.indexOf(known);
@@ -650,7 +656,7 @@ async function playCard(index) {
                 playback = await resolvePlayback(video, true);
             } catch { /* keep the previous URL */ }
             if (token !== playToken || currentVideoIndex !== index) return;
-            modes = modesFor(forced, isHls(playback), playback && playback.needsReferer);
+            modes = modesFor(forced, isHls(playback), playbackNeedsProxy(playback));
             i = -1;
             continue;
         }

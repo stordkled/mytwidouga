@@ -286,6 +286,10 @@ async function expandItem(item, referer, cookie) {
     return expanded;
 }
 
+function urlIsIpBound(url) {
+    return /[?&](?:ip|ipa)=/i.test(String(url || ''));
+}
+
 function choosePlayable(file, hls) {
     if (file && !file.needsReferer) return file;
     if (file) return file;
@@ -303,7 +307,7 @@ async function candidatePlays(media, referer) {
         } catch {
             withoutReferer = false;
         }
-        media.needsReferer = !withoutReferer;
+        media.needsReferer = urlIsIpBound(media.url) || !withoutReferer;
         return true;
     } catch {
         return false;
@@ -427,6 +431,7 @@ module.exports = {
     rankMedia,
     shortSignedHls,
     choosePlayable,
+    urlIsIpBound,
     SELECTORS,
     PERIODS,
 };
