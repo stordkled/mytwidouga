@@ -30,10 +30,21 @@ Edit `config/sources.json`, or override it without a code change:
 | `RESOLVE_TTL_MS` | Signed media URL cache. Default 3 minutes. |
 | `DOMAIN_MEMORY_TTL_MS` | How long the last working domain is preferred. Default 30 minutes. |
 | `MIRROR_TIMEOUT_MS` | Per-domain timeout. Default 12 seconds. |
+| `PLAYBACK_MODE` | `auto` (default), `direct`, `playlist-proxy`, `proxy`, or `embed`. `SOURCE_PLAYBACK_85PO` overrides one source. |
+| `FULL_PROXY` | `0` turns off the full video relay. Default on, capped by `MAX_PROXY_STREAMS` (default 3). |
 
-`GET /api/status` includes `domains.<id>.active`, `expiresAt`, and `candidates`.
+`GET /api/status` includes `domains.<id>.active`, `expiresAt`, `candidates`, and the playback settings.
 
-Each adapter exports `getEmbedUrl(video)`. The feed uses that iframe when a direct or proxied file cannot be resolved or fails in the player. A transparent layer stays over the iframe so vertical swipes still move the feed; a tap hands the card to the embed, and "スワイプに戻す" puts the layer back.
+## Playback ladder
+
+In `auto`, each source remembers the first step that starts playback:
+
+1. **direct** — the viewer's `<video>` loads the MP4 or HLS URL from the CDN. The page sends no referrer. Safari plays HLS natively; other browsers use hls.js when the CDN allows CORS.
+2. **playlist-proxy** — `/proxy/playlist` rewrites only the m3u8. Segment URLs stay on the CDN.
+3. **proxy** — the full relay, only while `fullProxyEnabled` is true and fewer than `maxProxyStreams` relays are open.
+4. **embed** — `getEmbedUrl`, in a sandboxed iframe (`allow-scripts allow-same-origin allow-presentation`, no popups or top navigation) with `autoplay=1&muted=1` added when the URL accepts a query. A transparent layer keeps vertical swipes on the feed and forwards a tap to the player. The rank and title stay on top of the iframe. The next card is preloaded unless that would open a full relay.
+
+The media URL is resolved when the card is about to play. If that attempt fails, the app resolves once more, then steps down for that video. A datacenter and a phone can land on different steps when a CDN binds the URL to the IP that resolved it. `PLAYBACK_MODE=embed` skips straight to the iframe. Headless Chrome, if used, is limited to one page.
 
 ## Sources
 
@@ -83,6 +94,7 @@ module.exports = {
   cacheTtlMs: 30 * 60 * 1000,   // optional; otherwise config/sources.json
   timeoutMs: 60000,             // optional
 
+  // Optional. Official iframe used when direct and proxied playback do not start.
   getEmbedUrl(video) {
     return `https://example.com/embed/${video.id}`;
   },

@@ -2,6 +2,7 @@ const { TtlCache, withTimeout } = require('../lib/cache');
 const { resolvePeriod } = require('../lib/periods');
 const { finalizeVideos } = require('../lib/video');
 const mirrors = require('../lib/mirrors');
+const { withAutoplay } = require('../lib/playback');
 
 // Register a source by adding its module here. The file must export the
 // fields documented in the README section "Adding a source".
@@ -60,7 +61,7 @@ function withEmbeds(adapter, videos) {
         if (!embedUrl) return video;
         return {
             ...video,
-            playback: { ...video.playback, embedUrl },
+            playback: decoratePlayback({ ...video.playback, embedUrl }),
         };
     });
 }
@@ -81,6 +82,24 @@ function publicSource(adapter) {
         color: adapter.color || '#ffffff',
         periods: adapter.periods.map((period) => ({ id: period.id, label: period.label })),
     };
+}
+
+function playbackConfig() {
+    const global = mirrors.settings();
+    return {
+        mode: global.playbackMode,
+        fullProxyEnabled: global.fullProxyEnabled,
+        maxProxyStreams: global.maxProxyStreams,
+        sources: Object.fromEntries(adapters.map((adapter) => [adapter.id, mirrors.playbackModeFor(adapter.id)])),
+    };
+}
+
+function decoratePlayback(playback) {
+    if (!playback) return playback;
+    const next = { ...playback };
+    if (next.embedUrl) next.embedUrl = withAutoplay(next.embedUrl);
+    if (next.kind === 'embed' && next.url) next.url = withAutoplay(next.url);
+    return next;
 }
 
 function list() {
@@ -161,7 +180,7 @@ async function fetchRanking(sourceId, requestedPeriod) {
     }
 }
 
-async function resolvePlayback(sourceId, videoId) {
+async function resolvePlayback(sourceId, videoId, options = {}) {
     const adapter = byId.get(sourceId);
     if (!adapter) {
         const error = new Error(`Unknown source "${sourceId}"`);
@@ -179,17 +198,23 @@ async function resolvePlayback(sourceId, videoId) {
         throw error;
     }
     const cacheKey = `${adapter.id}:${videoId}`;
+    if (options.fresh) resolveCache.delete(cacheKey);
     const timeout = adapter.timeoutMs || mirrors.settings().requestTimeoutMs;
     try {
         const loaded = await resolveCache.getOrLoad(cacheKey, mirrors.settings().resolveTtlMs, () => (
             withTimeout(Promise.resolve(adapter.resolvePlayback(String(videoId))), timeout, adapter.name)
         ));
-        return { ok: true, cached: loaded.cached, playback: loaded.value };
+        return { ok: true, cached: loaded.cached, playback: decoratePlayback(loaded.value) };
     } catch (err) {
         console.error(`[${adapter.id}] resolve ${videoId} failed:`, err.message);
         const embedUrl = embedFor(adapter, { id: String(videoId) });
         if (embedUrl) {
-            return { ok: true, cached: false, playback: { kind: 'embed', url: embedUrl, embedUrl }, via: 'embed' };
+            return {
+                ok: true,
+                cached: false,
+                playback: decoratePlayback({ kind: 'embed', url: embedUrl, embedUrl }),
+                via: 'embed',
+            };
         }
         return { ok: false, error: errorMessage(err), playback: null };
     }
@@ -214,6 +239,7 @@ module.exports = {
     get,
     proxyView,
     domainStatus,
+    playbackConfig,
     fetchRanking,
     resolvePlayback,
     lookupExternal,

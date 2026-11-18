@@ -2,7 +2,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const sources = require('./sources');
-const { proxyMedia } = require('./lib/proxy');
+const { proxyMedia, proxyStatus } = require('./lib/proxy');
+const mirrors = require('./lib/mirrors');
 const { closeBrowser, status: browserStatus } = require('./lib/browser');
 
 const PORT = process.env.PORT || 3000;
@@ -62,13 +63,15 @@ const server = http.createServer(async (req, res) => {
             browser: browserStatus(),
             sources: sources.list(),
             domains: sources.domainStatus(),
+            playback: sources.playbackConfig(),
+            proxy: proxyStatus(),
             timestamp: new Date().toISOString(),
         });
         return;
     }
 
     if (url.pathname === '/api/sources') {
-        sendJson(res, 200, { sources: sources.list() });
+        sendJson(res, 200, { sources: sources.list(), playback: sources.playbackConfig() });
         return;
     }
 
@@ -90,7 +93,7 @@ const server = http.createServer(async (req, res) => {
         const sourceId = url.searchParams.get('source') || '';
         const id = url.searchParams.get('id') || '';
         try {
-            const result = await sources.resolvePlayback(sourceId, id);
+            const result = await sources.resolvePlayback(sourceId, id, { fresh: url.searchParams.get('fresh') === '1' });
             sendJson(res, result.ok ? 200 : 502, result);
         } catch (err) {
             sendJson(res, err.status || 500, { ok: false, error: err.message, playback: null });
@@ -110,16 +113,22 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    if (url.pathname === '/proxy/media') {
+    if (url.pathname === '/proxy/media' || url.pathname === '/proxy/playlist') {
         const sourceId = url.searchParams.get('source') || '';
         const targetUrl = url.searchParams.get('url') || '';
         const source = sources.proxyView(sourceId);
+        const playlistOnly = url.pathname === '/proxy/playlist';
         if (!source || !targetUrl) {
             res.writeHead(400);
             res.end('Bad Request');
             return;
         }
-        await proxyMedia(targetUrl, source, req, res);
+        if (!playlistOnly && !mirrors.settings().fullProxyEnabled) {
+            res.writeHead(403);
+            res.end('Full proxy disabled');
+            return;
+        }
+        await proxyMedia(targetUrl, source, req, res, undefined, undefined, { playlistOnly });
         return;
     }
 

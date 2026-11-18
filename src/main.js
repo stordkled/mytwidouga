@@ -23,12 +23,28 @@ let lastTapTime = 0;
 let loadController = null;
 let playToken = 0;
 let activePlay = -1;
-const RESOLVE_TTL_MS = 3 * 60 * 1000;
-const resolvedCache = new Map();
+let playbackConfig = { mode: 'auto', fullProxyEnabled: true, maxProxyStreams: 3, sources: {} };
+const sourceStrategy = new Map();
+
+const PLAYBACK_LADDER = ['direct', 'playlist-proxy', 'proxy', 'embed'];
 
 function mediaProxy(sourceId, url) {
     if (!url) return '';
     return `/proxy/media?source=${encodeURIComponent(sourceId)}&url=${encodeURIComponent(url)}`;
+}
+
+function playlistProxy(sourceId, url) {
+    return `/proxy/playlist?source=${encodeURIComponent(sourceId)}&url=${encodeURIComponent(url)}`;
+}
+
+function modesFor(mode, hls) {
+    if (mode === 'embed') return ['embed'];
+    const start = !mode || mode === 'auto' ? 0 : PLAYBACK_LADDER.indexOf(mode);
+    let list = start >= 0 ? PLAYBACK_LADDER.slice(start) : PLAYBACK_LADDER.slice();
+    if (!playbackConfig.fullProxyEnabled) list = list.filter((item) => item !== 'proxy');
+    if (!hls) list = list.filter((item) => item !== 'playlist-proxy');
+    if (!list.includes('embed')) list.push('embed');
+    return list;
 }
 
 function safeColor(color) {
@@ -145,7 +161,7 @@ function createVideoCard(video, index) {
 
     card.innerHTML = `
     <div class="video-wrapper">
-      <video loop muted playsinline preload="none" ${poster ? `poster="${poster.replace(/"/g, '')}"` : ''}></video>
+      <video loop muted playsinline preload="none" referrerpolicy="no-referrer" ${poster ? `poster="${poster.replace(/"/g, '')}"` : ''}></video>
     </div>
     <div class="gradient-top"></div>
     <div class="gradient-bottom"></div>
@@ -222,10 +238,10 @@ function stopCard(card) {
     }
     const media = card.querySelector('video');
     if (media) {
+        media.onerror = null;
         media.pause();
         media.removeAttribute('src');
         media.style.display = '';
-        media.load();
     }
     const frame = card.querySelector('iframe.embed-player');
     if (frame) frame.remove();
@@ -298,10 +314,9 @@ function forgetPlayback(video) {
     if (video && currentSource) resolvedCache.delete(resolvedKey(video));
 }
 
-async function resolvePlayback(video) {
-    const cached = cachedPlayback(video);
-    if (cached) return cached;
-    const response = await fetch(`/api/resolve?source=${encodeURIComponent(currentSource.id)}&id=${encodeURIComponent(video.id)}`);
+async function resolvePlayback(video, fresh) {
+    if (video.playback.kind !== 'resolve') return video.playback;
+    const response = await fetch(`/api/resolve?source=${encodeURIComponent(currentSource.id)}&id=${encodeURIComponent(video.id)}${fresh ? '&fresh=1' : ''}`);
     const data = await response.json();
     if (!data.ok || !data.playback) {
         if (video.playback.embedUrl) {
@@ -310,7 +325,6 @@ async function resolvePlayback(video) {
         throw new Error(data.error || '再生情報を取得できませんでした');
     }
     if (data.playback.embedUrl) video.playback.embedUrl = data.playback.embedUrl;
-    rememberPlayback(video, data.playback);
     return data.playback;
 }
 
@@ -321,7 +335,6 @@ function failDirectPlayback(card, index, embedUrl, message) {
     if (media) {
         media.onerror = null;
         media.removeAttribute('src');
-        media.load();
     }
     if (embedUrl) {
         mountEmbed(card, embedUrl);
@@ -341,7 +354,8 @@ function mountEmbed(card, embedUrl) {
         frame.className = 'embed-player';
         frame.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture');
         frame.setAttribute('allowfullscreen', '');
-        frame.setAttribute('referrerpolicy', 'no-referrer-when-downgrade');
+        frame.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+        frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation');
         wrapper.appendChild(frame);
     }
     if (frame.src !== embedUrl) frame.src = embedUrl;
@@ -372,64 +386,132 @@ function mountEmbed(card, embedUrl) {
     if (progress) progress.style.display = 'none';
 }
 
+function prepareVideo(media) {
+    media.referrerPolicy = 'no-referrer';
+    media.setAttribute('referrerpolicy', 'no-referrer');
+    media.muted = isMuted;
+    media.playsInline = true;
+}
+
+function waitUntilPlaying(media, timeout = 8000) {
+    return new Promise((resolve) => {
+        if (media.error) {
+            resolve(false);
+            return;
+        }
+        const timer = setTimeout(() => finish(media.readyState >= 2 && !media.error), timeout);
+        const ok = () => finish(true);
+        const bad = () => finish(false);
+        function finish(success) {
+            clearTimeout(timer);
+            media.removeEventListener('playing', ok);
+            media.removeEventListener('loadeddata', ok);
+            media.removeEventListener('error', bad);
+            resolve(success);
+        }
+        media.addEventListener('playing', ok);
+        media.addEventListener('loadeddata', ok);
+        media.addEventListener('error', bad);
+    });
+}
+
 function mountFile(card, index, url) {
     const media = card.querySelector('video');
     media.style.display = '';
+    prepareVideo(media);
+    const started = waitUntilPlaying(media);
     media.src = url;
-    media.muted = isMuted;
     const playPromise = media.play();
-    if (playPromise) {
-        playPromise.then(() => showPlayIcon(index, false, false)).catch(() => showPlayIcon(index, true, true));
-    }
+    if (playPromise) playPromise.catch(() => {});
     startProgressTracking(media, index);
-    media.onerror = () => {
-        const embedUrl = videos[index] && videos[index].playback.embedUrl;
-        failDirectPlayback(
-            card,
-            index,
-            embedUrl,
-            embedUrl ? '直接再生できないため、埋め込みプレイヤーに切り替えます' : 'この動画を再生できませんでした'
-        );
-    };
+    return started;
 }
 
 function mountHls(card, index, url) {
     const media = card.querySelector('video');
     media.style.display = '';
-    const embedUrl = videos[index] && videos[index].playback.embedUrl;
-    const fail = () => {
-        if (card._hls) {
-            card._hls.destroy();
-            card._hls = null;
-        }
-        failDirectPlayback(
-            card,
-            index,
-            embedUrl,
-            embedUrl ? 'HLSを再生できないため、埋め込みプレイヤーに切り替えます' : 'この動画を再生できませんでした'
-        );
-    };
-
+    prepareVideo(media);
     if (media.canPlayType('application/vnd.apple.mpegurl')) {
-        mountFile(card, index, url);
-        return;
+        return mountFile(card, index, url);
     }
-    if (!window.Hls || !window.Hls.isSupported()) {
-        fail();
-        return;
+    if (!window.Hls || !window.Hls.isSupported()) return Promise.resolve(false);
+    if (card._hls) {
+        card._hls.destroy();
+        card._hls = null;
     }
     const hls = new window.Hls({ enableWorker: true });
     card._hls = hls;
-    hls.loadSource(url);
-    hls.attachMedia(media);
-    hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
-        media.muted = isMuted;
-        media.play().then(() => showPlayIcon(index, false, false)).catch(() => showPlayIcon(index, true, true));
-        startProgressTracking(media, index);
+    return new Promise((resolve) => {
+        let settled = false;
+        const finish = (ok) => {
+            if (settled) return;
+            settled = true;
+            if (!ok && card._hls === hls) {
+                hls.destroy();
+                card._hls = null;
+            }
+            resolve(ok);
+        };
+        const timer = setTimeout(() => finish(false), 8000);
+        hls.on(window.Hls.Events.ERROR, (_, data) => {
+            if (data && data.fatal) {
+                clearTimeout(timer);
+                finish(false);
+            }
+        });
+        hls.on(window.Hls.Events.FRAG_LOADED, () => {
+            clearTimeout(timer);
+            finish(true);
+        });
+        hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+            media.muted = isMuted;
+            media.play().then(() => {
+                showPlayIcon(index, false, false);
+                startProgressTracking(media, index);
+            }).catch(() => showPlayIcon(index, true, true));
+        });
+        hls.loadSource(url);
+        hls.attachMedia(media);
     });
-    hls.on(window.Hls.Events.ERROR, (_, data) => {
-        if (data && data.fatal) fail();
-    });
+}
+
+function isHls(playback) {
+    return Boolean(playback && (playback.kind === 'hls' || (playback.url && /\.m3u8(\?|$)/i.test(playback.url))));
+}
+
+function clearMedia(card) {
+    if (card._hls) {
+        card._hls.destroy();
+        card._hls = null;
+    }
+    const media = card.querySelector('video');
+    if (media) {
+        media.onerror = null;
+        media.pause();
+        media.removeAttribute('src');
+    }
+}
+
+async function tryMode(mode, playback, card, index) {
+    clearMedia(card);
+    const embedUrl = (playback && playback.embedUrl) || (videos[index] && videos[index].playback.embedUrl);
+    if (mode === 'embed') {
+        if (!embedUrl) return false;
+        mountEmbed(card, embedUrl);
+        return true;
+    }
+    if (!playback || !playback.url) return false;
+    const hls = isHls(playback);
+    let played = false;
+    if (mode === 'direct') {
+        played = hls ? await mountHls(card, index, playback.url) : await mountFile(card, index, playback.url);
+    } else if (mode === 'playlist-proxy' && hls) {
+        played = await mountHls(card, index, playlistProxy(currentSource.id, playback.url));
+    } else if (mode === 'proxy') {
+        const proxied = mediaProxy(currentSource.id, playback.url);
+        played = hls ? await mountHls(card, index, proxied) : await mountFile(card, index, proxied);
+    }
+    return played;
 }
 
 async function playCard(index) {
@@ -443,35 +525,76 @@ async function playCard(index) {
     videoFeed.querySelectorAll('.video-card').forEach((other, otherIndex) => {
         if (otherIndex !== index) stopCard(other);
     });
+
+    const forced = (playbackConfig.sources && playbackConfig.sources[currentSource.id]) || playbackConfig.mode || 'auto';
     let playback = video.playback;
     try {
-        if (playback.kind === 'resolve') playback = await resolvePlayback(video);
+        playback = await resolvePlayback(video, false);
     } catch (err) {
-        if (token !== playToken) return;
-        activePlay = -1;
-        if (video.playback.embedUrl) {
-            mountEmbed(card, video.playback.embedUrl);
-            return;
-        }
-        showCardMessage(card, err.message || '再生情報を取得できませんでした');
-        showPlayIcon(index, true, true);
-        return;
+        playback = { kind: 'embed', url: video.playback.embedUrl, embedUrl: video.playback.embedUrl, error: err.message };
     }
     if (token !== playToken || currentVideoIndex !== index) return;
 
-    const kind = playback.kind === 'hls' || (playback.url && /\.m3u8(\?|$)/i.test(playback.url))
-        ? 'hls'
-        : playback.kind;
-    if (kind === 'embed' || (!playback.url && playback.embedUrl)) {
-        mountEmbed(card, playback.embedUrl || playback.url);
-        return;
+    let modes = modesFor(forced, isHls(playback));
+    const known = sourceStrategy.get(currentSource.id);
+    if (known) {
+        const at = modes.indexOf(known);
+        if (at > 0) modes = modes.slice(at);
     }
-    const proxied = mediaProxy(currentSource.id, playback.url);
-    if (kind === 'hls') mountHls(card, index, proxied);
-    else mountFile(card, index, proxied);
 
-    const indicator = document.getElementById('scrollIndicator');
-    if (indicator && index > 0) indicator.classList.add('hidden');
+    let resolvedOnceMore = false;
+    for (let i = 0; i < modes.length; i += 1) {
+        const mode = modes[i];
+        if (token !== playToken || currentVideoIndex !== index) return;
+        let ok = await tryMode(mode, playback, card, index);
+        if (!ok && mode !== 'embed' && !resolvedOnceMore && video.playback.kind === 'resolve') {
+            resolvedOnceMore = true;
+            try {
+                playback = await resolvePlayback(video, true);
+            } catch { /* keep the previous URL */ }
+            if (token !== playToken || currentVideoIndex !== index) return;
+            ok = await tryMode(mode, playback, card, index);
+        }
+        if (ok) {
+            if (forced === 'auto') sourceStrategy.set(currentSource.id, mode);
+            showPlayIcon(index, false, false);
+            const indicator = document.getElementById('scrollIndicator');
+            if (indicator && index > 0) indicator.classList.add('hidden');
+            preloadNext(index);
+            return;
+        }
+        clearMedia(card);
+    }
+    if (token !== playToken) return;
+    activePlay = -1;
+    showCardMessage(card, 'この動画を再生できませんでした');
+    showPlayIcon(index, true, true);
+}
+
+function preloadNext(index) {
+    const next = videos[index + 1];
+    const card = cardAt(index + 1);
+    if (!next || !card || next._preloading || next._preloaded) return;
+    const mode = sourceStrategy.get(currentSource.id);
+    if (mode === 'proxy') return;
+    next._preloading = true;
+    resolvePlayback(next, false).then((playback) => {
+        next._preloaded = true;
+        if (currentVideoIndex !== index) return;
+        if (mode === 'embed' || (playback && playback.kind === 'embed')) {
+            const embedUrl = (playback && (playback.embedUrl || playback.url)) || next.playback.embedUrl;
+            if (embedUrl && !card.querySelector('iframe.embed-player')) mountEmbed(card, embedUrl);
+            return;
+        }
+        if (!playback || !playback.url || mode === 'proxy') return;
+        const media = card.querySelector('video');
+        if (!media || media.getAttribute('src')) return;
+        prepareVideo(media);
+        media.preload = 'metadata';
+        if (!isHls(playback) && (mode === 'direct' || !mode)) media.src = playback.url;
+    }).catch(() => {
+        next._preloaded = true;
+    });
 }
 
 function setupObserver() {
@@ -518,14 +641,55 @@ function updateAllMuteState() {
     });
 }
 
+function bindEmbedShield(overlay) {
+    let startY = 0;
+    let lastY = 0;
+    let moved = false;
+    overlay.addEventListener('pointerdown', (event) => {
+        if (!overlay.closest('.embed-shield')) return;
+        startY = lastY = event.clientY;
+        moved = false;
+        overlay.setPointerCapture(event.pointerId);
+    });
+    overlay.addEventListener('pointermove', (event) => {
+        if (!overlay.closest('.embed-shield')) return;
+        const dy = event.clientY - lastY;
+        if (Math.abs(event.clientY - startY) > 10) {
+            moved = true;
+            videoFeed.scrollTop -= dy;
+            lastY = event.clientY;
+        }
+    });
+    overlay.addEventListener('pointerup', (event) => {
+        if (!overlay.closest('.embed-shield')) return;
+        try { overlay.releasePointerCapture(event.pointerId); } catch { /* already released */ }
+        if (moved) return;
+        overlay.style.pointerEvents = 'none';
+        const under = document.elementFromPoint(event.clientX, event.clientY);
+        overlay.style.pointerEvents = '';
+        if (under && under !== overlay) {
+            under.dispatchEvent(new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                clientX: event.clientX,
+                clientY: event.clientY,
+                view: window,
+            }));
+        }
+    });
+    overlay.addEventListener('wheel', (event) => {
+        if (!overlay.closest('.embed-shield')) return;
+        videoFeed.scrollTop += event.deltaY;
+        event.preventDefault();
+    }, { passive: false });
+}
+
 function setupEventListeners() {
     videoFeed.querySelectorAll('.play-pause-overlay').forEach((overlay) => {
+        bindEmbedShield(overlay);
         overlay.addEventListener('click', (event) => {
             const card = overlay.closest('.video-card');
-            if (card && card.classList.contains('embed-shield')) {
-                card.classList.add('embed-interactive');
-                return;
-            }
+            if (card && card.classList.contains('embed-shield')) return;
             const now = Date.now();
             const index = Number(overlay.dataset.index);
             if (now - lastTapTime < 400) {
@@ -666,6 +830,7 @@ async function init() {
         const response = await fetch('/api/sources');
         const data = await response.json();
         sources = data.sources || [];
+        playbackConfig = data.playback || playbackConfig;
         if (sources.length === 0) throw new Error('ソースがありません');
         const saved = localStorage.getItem(STORAGE_SOURCE);
         currentSource = sources.find((source) => source.id === saved) || sources[0];

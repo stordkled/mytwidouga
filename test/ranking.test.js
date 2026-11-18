@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { resolvePeriod } = require('../lib/periods');
 const { rewritePlaylist, hostAllowed, isPublicHttpUrl } = require('../lib/proxy');
+const { modesFor } = require('../lib/playback');
 const { finalizeVideos } = require('../lib/video');
 const pornhub = require('../sources/pornhub');
 const po85 = require('../sources/85po');
@@ -40,6 +41,27 @@ test('playlist rewrite keeps variant and key URIs on the proxy', () => {
     assert.match(rewritten, /source=missav&url=[^\n]*index\.m3u8/);
     assert.match(rewritten, /source=missav&url=[^\n]*seg-1\.ts/);
     assert.doesNotMatch(rewritten, /^index\.m3u8/m);
+});
+
+test('playlist-proxy rewrites segments to the CDN and keeps nested playlists on the server', () => {
+    const body = [
+        '#EXTM3U',
+        '#EXT-X-STREAM-INF:BANDWIDTH=1000',
+        'index.m3u8?token=a',
+        'https://cdn.example/seg-1.ts',
+    ].join('\n');
+    const rewritten = rewritePlaylist(body, 'https://cdn.example/hls/master.m3u8', 'pornhub', { segmentMode: 'direct' });
+    assert.match(rewritten, /\/proxy\/playlist\?source=pornhub&url=[^\n]*index\.m3u8/);
+    assert.match(rewritten, /^https:\/\/cdn\.example\/seg-1\.ts$/m);
+    assert.doesNotMatch(rewritten, /seg-1\.ts[\s\S]*\/proxy\/media/);
+});
+
+test('auto mode walks direct, playlist proxy, capped full proxy, then embed', () => {
+    assert.deepEqual(modesFor({ mode: 'auto', fullProxyEnabled: true, hls: true }), [
+        'direct', 'playlist-proxy', 'proxy', 'embed',
+    ]);
+    assert.deepEqual(modesFor({ mode: 'auto', fullProxyEnabled: false, hls: false }), ['direct', 'embed']);
+    assert.deepEqual(modesFor({ mode: 'embed' }), ['embed']);
 });
 
 test('proxy allowlist is per host suffix and rejects private targets', () => {
