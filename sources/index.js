@@ -40,6 +40,37 @@ for (const adapter of adapters) {
 
 const rankingCache = new TtlCache();
 const resolveCache = new TtlCache();
+const sourceFailures = new Map();
+
+function noteSourceResult(sourceId, ok, message) {
+    if (ok) {
+        sourceFailures.set(sourceId, { count: 0, blocked: false });
+        return;
+    }
+    const blocked = /block page|cloudflare|attention required|just a moment|しばらくお待ち/i.test(message || '');
+    const previous = sourceFailures.get(sourceId) || { count: 0, blocked: false };
+    const bump = blocked ? mirrors.settings().hideAfterFailures : 1;
+    sourceFailures.set(sourceId, { count: previous.count + bump, blocked: blocked || previous.blocked });
+}
+
+function sourceHidden(sourceId) {
+    if (!mirrors.settings().hideFailedSources) return false;
+    const record = sourceFailures.get(sourceId);
+    if (!record) return false;
+    return record.count >= mirrors.settings().hideAfterFailures;
+}
+
+function friendlyFailure(name, raw) {
+    const text = String(raw || '');
+    if (/block page|cloudflare|attention required|just a moment|しばらくお待ち/i.test(text)) {
+        return `${name} はこのネットワークから開けません`;
+    }
+    if (/redirected away/i.test(text)) {
+        return `${name} のランキングを取得できませんでした`;
+    }
+    if (text.length > 180) return `${name} の読み込みに失敗しました`;
+    return text;
+}
 
 function mergedHosts(adapter) {
     const fromBases = mirrors.basesFor(adapter.id, adapter.bases || []).map(mirrors.hostOf).filter(Boolean);
@@ -80,6 +111,7 @@ function publicSource(adapter) {
         id: adapter.id,
         name: adapter.name,
         color: adapter.color || '#ffffff',
+        hidden: sourceHidden(adapter.id),
         periods: adapter.periods.map((period) => ({ id: period.id, label: period.label })),
     };
 }
@@ -91,6 +123,11 @@ function playbackConfig() {
         fullProxyEnabled: global.fullProxyEnabled,
         maxProxyStreams: global.maxProxyStreams,
         sources: Object.fromEntries(adapters.map((adapter) => [adapter.id, mirrors.playbackModeFor(adapter.id)])),
+        thumbs: Object.fromEntries(adapters.map((adapter) => {
+            const fromEnv = process.env[`SOURCE_THUMBS_${adapter.id.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`];
+            const fromFile = (mirrors.sourceConfig(adapter.id).thumbs) || '';
+            return [adapter.id, fromEnv || fromFile || 'auto'];
+        })),
     };
 }
 
@@ -154,6 +191,7 @@ async function fetchRanking(sourceId, requestedPeriod) {
             }
             return finalized;
         });
+        noteSourceResult(adapter.id, true);
         return {
             ok: true,
             cached: loaded.cached,
@@ -166,6 +204,8 @@ async function fetchRanking(sourceId, requestedPeriod) {
         };
     } catch (err) {
         console.error(`[${adapter.id}] ${resolved.period.id} failed:`, err.message);
+        const raw = errorMessage(err);
+        noteSourceResult(adapter.id, false, raw);
         return {
             ok: false,
             cached: false,
@@ -174,7 +214,9 @@ async function fetchRanking(sourceId, requestedPeriod) {
             requestedPeriod: resolved.requestedPeriod,
             fallback: resolved.fallback,
             fallbackReason: resolved.fallback ? resolved.fallbackReason : null,
-            error: errorMessage(err),
+            error: friendlyFailure(adapter.name, raw),
+            detail: raw,
+            hidden: sourceHidden(adapter.id),
             videos: [],
         };
     }

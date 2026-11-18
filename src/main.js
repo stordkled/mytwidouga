@@ -25,6 +25,45 @@ let playToken = 0;
 let activePlay = -1;
 let playbackConfig = { mode: 'auto', fullProxyEnabled: true, maxProxyStreams: 3, sources: {} };
 const sourceStrategy = new Map();
+const thumbStrategy = new Map();
+
+function thumbPreference(sourceId) {
+    const configured = playbackConfig.thumbs && playbackConfig.thumbs[sourceId];
+    if (configured === 'direct' || configured === 'proxy') return configured;
+    return thumbStrategy.get(sourceId) || 'direct';
+}
+
+function posterFor(sourceId, remote) {
+    if (!remote) return '';
+    return thumbPreference(sourceId) === 'proxy' ? mediaProxy(sourceId, remote) : remote;
+}
+
+function ensureThumbMode(sourceId, sample) {
+    if (!sample || thumbStrategy.has(sourceId)) return Promise.resolve();
+    const configured = playbackConfig.thumbs && playbackConfig.thumbs[sourceId];
+    if (configured === 'direct' || configured === 'proxy') {
+        thumbStrategy.set(sourceId, configured);
+        return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+        const img = new Image();
+        const finish = (mode) => {
+            thumbStrategy.set(sourceId, mode);
+            resolve();
+        };
+        const timer = setTimeout(() => finish('proxy'), 4000);
+        img.referrerPolicy = 'no-referrer';
+        img.onload = () => {
+            clearTimeout(timer);
+            finish('direct');
+        };
+        img.onerror = () => {
+            clearTimeout(timer);
+            finish('proxy');
+        };
+        img.src = sample;
+    });
+}
 
 const PLAYBACK_LADDER = ['direct', 'playlist-proxy', 'proxy', 'embed'];
 
@@ -88,9 +127,14 @@ function setFallbackNote(text) {
     }
 }
 
+function visibleSources() {
+    const shown = sources.filter((source) => !source.hidden);
+    return shown.length ? shown : sources;
+}
+
 function renderSourceBar() {
     sourceBar.replaceChildren();
-    sources.forEach((source) => {
+    visibleSources().forEach((source) => {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'source-btn' + (source.id === currentSource.id ? ' active' : '');
@@ -156,7 +200,7 @@ function createVideoCard(video, index) {
     card.className = 'video-card';
     card.dataset.index = String(index);
 
-    const poster = video.thumbUrl ? mediaProxy(currentSource.id, video.thumbUrl) : '';
+    const poster = posterFor(currentSource.id, video.thumbUrl);
     const chipColor = safeColor(currentSource.color);
 
     card.innerHTML = `
@@ -427,11 +471,19 @@ function mountFile(card, index, url) {
     return started;
 }
 
+function useNativeHls(media) {
+    const ua = navigator.userAgent;
+    const safari = /Safari/i.test(ua) && !/Chrome|Chromium|Edg|OPR|Android/i.test(ua);
+    const ios = /iPhone|iPad|iPod/i.test(ua);
+    if (!(safari || ios)) return false;
+    return !!media.canPlayType('application/vnd.apple.mpegurl');
+}
+
 function mountHls(card, index, url) {
     const media = card.querySelector('video');
     media.style.display = '';
     prepareVideo(media);
-    if (media.canPlayType('application/vnd.apple.mpegurl')) {
+    if (useNativeHls(media)) {
         return mountFile(card, index, url);
     }
     if (!window.Hls || !window.Hls.isSupported()) return Promise.resolve(false);
@@ -439,7 +491,12 @@ function mountHls(card, index, url) {
         card._hls.destroy();
         card._hls = null;
     }
-    const hls = new window.Hls({ enableWorker: true });
+    const hls = new window.Hls({
+        enableWorker: false,
+        lowLatencyMode: false,
+        maxBufferLength: 12,
+        backBufferLength: 30,
+    });
     card._hls = hls;
     return new Promise((resolve) => {
         let settled = false;
@@ -782,6 +839,27 @@ async function loadVideos() {
         const data = await response.json();
         if (signal.aborted || source.id !== currentSource.id) return;
         if (!data.ok) {
+            if (data.source) {
+                const listed = sources.find((item) => item.id === data.source.id);
+                if (listed) listed.hidden = !!data.source.hidden;
+            }
+            if (data.hidden) {
+                renderSourceBar();
+                const next = visibleSources().find((item) => item.id !== source.id);
+                if (next && visibleSources().some((item) => item.id === next.id) && sources.some((item) => item.hidden)) {
+                    currentSource = next;
+                    const savedPeriod = localStorage.getItem(STORAGE_PERIOD + next.id);
+                    currentPeriod = next.periods.some((period) => period.id === savedPeriod) ? savedPeriod : next.periods[0].id;
+                    localStorage.setItem(STORAGE_SOURCE, next.id);
+                    renderSourceBar();
+                    renderPeriodBar();
+                    setFallbackNote(`${source.name} はこのネットワークから開けないため非表示にしました`);
+                    setLoading(false);
+                    isLoading = false;
+                    loadVideos();
+                    return;
+                }
+            }
             showMessage(`${source.name} を読み込めませんでした`, data.error || '不明なエラー', () => loadVideos());
             setLoading(false);
             return;
@@ -793,6 +871,9 @@ async function loadVideos() {
             setLoading(false);
             return;
         }
+        const sample = videos.find((video) => video.thumbUrl);
+        await ensureThumbMode(source.id, sample && sample.thumbUrl);
+        if (signal.aborted || source.id !== currentSource.id) return;
         renderVideos(videos);
         currentVideoIndex = 0;
         videoFeed.scrollTo({ top: 0 });

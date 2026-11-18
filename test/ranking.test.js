@@ -54,6 +54,11 @@ test('playlist-proxy rewrites segments to the CDN and keeps nested playlists on 
     assert.match(rewritten, /\/proxy\/playlist\?source=pornhub&url=[^\n]*index\.m3u8/);
     assert.match(rewritten, /^https:\/\/cdn\.example\/seg-1\.ts$/m);
     assert.doesNotMatch(rewritten, /seg-1\.ts[\s\S]*\/proxy\/media/);
+    const absolute = rewritePlaylist(body, 'https://ev-h.phncdn.com/hls/x/file.mp4/master.m3u8', 'pornhub', {
+        segmentMode: 'proxy',
+        origin: 'http://127.0.0.1:3000',
+    });
+    assert.match(absolute, /^http:\/\/127\.0\.0\.1:3000\/proxy\/media\?source=pornhub&url=/m);
 });
 
 test('auto mode walks direct, playlist proxy, capped full proxy, then embed', () => {

@@ -2,6 +2,8 @@
   "playbackMode": "auto",
   "fullProxyEnabled": true,
   "maxProxyStreams": 3,
+  "hideFailedSources": true,
+  "hideAfterFailures": 2,
   "cacheTtlMs": 1800000,
   "resolveTtlMs": 180000,
   "domainMemoryTtlMs": 1800000,

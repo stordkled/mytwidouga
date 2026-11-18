@@ -128,7 +128,10 @@ const server = http.createServer(async (req, res) => {
             res.end('Full proxy disabled');
             return;
         }
-        await proxyMedia(targetUrl, source, req, res, undefined, undefined, { playlistOnly });
+        const forwarded = req.headers['x-forwarded-proto'];
+        const proto = forwarded ? String(forwarded).split(',')[0].trim() : 'http';
+        const origin = req.headers.host ? `${proto}://${req.headers.host}` : '';
+        await proxyMedia(targetUrl, source, req, res, undefined, undefined, { playlistOnly, origin });
         return;
     }
 

@@ -35,6 +35,8 @@ Edit `config/sources.json`, or override it without a code change:
 
 `GET /api/status` includes `domains.<id>.active`, `expiresAt`, `candidates`, and the playback settings.
 
+Thumbnails load straight from the CDN with `referrerpolicy=no-referrer`. If that image fails, that source's posters fall back to `/proxy/media`. Set `SOURCE_THUMBS_85PO=proxy` (or `direct`) to skip the probe. A source whose ranking keeps failing is removed from the switcher (`hideFailedSources`, default on, after `hideAfterFailures` failures; a block page counts as a full strike). `HIDE_FAILED_SOURCES=0` keeps every tab.
+
 ## Playback ladder
 
 In `auto`, each source remembers the first step that starts playback:
