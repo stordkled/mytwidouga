@@ -1,15 +1,15 @@
 const { loadHtml, cleanText, absUrl } = require('../lib/html');
 const { getText, responseFailure } = require('../lib/http');
-const { withMirror, activeBase, playlistHostsFor, embedTemplateFor, fillTemplate } = require('../lib/mirrors');
+const { withMirror, activeBase, embedTemplateFor, fillTemplate } = require('../lib/mirrors');
 
 // MissAV ranking paths. /ja/today-hot redirects onto a rotating /dmNNN/ prefix,
 // so the prefix is not hardcoded. A block page tries the next base in
 // config/sources.json. Plain HTTP only: a Cloudflare challenge is a failure,
 // not something this adapter solves.
 //
-// The player builds https://surrit.com/<uuid>/playlist.m3u8. Extra playlist
-// hosts belong in playlistHosts / SOURCE_PLAYLIST_HOSTS_MISSAV. No official
-// embed URL was found; set SOURCE_EMBED_MISSAV=https://host/embed/{id} to add one.
+// Playback is embed-only. No official embed URL was found; set
+// SOURCE_EMBED_MISSAV=https://host/embed/{id} to add one. Without it, fail
+// explicitly rather than fetching a watch page or extracting a media URL.
 
 const DEFAULT_BASES = [
     'https://missav.ws',
@@ -72,16 +72,6 @@ function parseListing(html, base) {
     return videos;
 }
 
-function extractPlaylist(html, hosts = playlistHostsFor('missav', DEFAULT_PLAYLIST_HOSTS)) {
-    const list = hosts.length ? hosts : DEFAULT_PLAYLIST_HOSTS;
-    for (const host of list) {
-        const escaped = host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const match = html.match(new RegExp(`${escaped}\\\\?/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`, 'i'));
-        if (match) return `https://${host}/${match[1]}/playlist.m3u8`;
-    }
-    return null;
-}
-
 function getEmbedUrl(video) {
     const template = embedTemplateFor('missav');
     if (!template || !video) return null;
@@ -105,20 +95,8 @@ async function fetchRanking(periodId) {
 async function resolvePlayback(id) {
     if (!/^[a-z0-9-]+$/i.test(id)) throw new Error('Invalid MissAV video id');
     const embedUrl = getEmbedUrl({ id });
-    try {
-        const { result } = await withMirror('missav', DEFAULT_BASES, async (base) => {
-            const response = await getText(`${base}/ja/${id}`, { timeout: 12000, referer: `${base}/` });
-            const failure = responseFailure(response);
-            if (failure) throw new Error(failure);
-            const playlist = extractPlaylist(response.text);
-            if (!playlist) throw new Error('no playlist id');
-            return { playlist, referer: `${base}/` };
-        });
-        return { kind: 'hls', url: result.playlist, embedUrl, referer: result.referer };
-    } catch (err) {
-        if (!embedUrl) throw err;
-        return { kind: 'embed', url: embedUrl, embedUrl, referer: `${currentBase()}/` };
-    }
+    if (!embedUrl) throw new Error('MissAV playback is embed-only; configure SOURCE_EMBED_MISSAV');
+    return { kind: 'embed', url: embedUrl, embedUrl, referer: `${currentBase()}/` };
 }
 
 module.exports = {
@@ -146,7 +124,6 @@ module.exports = {
     resolvePlayback,
     getEmbedUrl,
     parseListing,
-    extractPlaylist,
     SELECTORS,
     PERIODS,
 };

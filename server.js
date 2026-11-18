@@ -98,10 +98,11 @@ async function handle(req, res) {
     if (url.pathname === '/api/videos') {
         const sourceId = url.searchParams.get('source') || 'twivideo';
         const period = url.searchParams.get('period') || url.searchParams.get('sort') || '';
+        const metric = (url.searchParams.get('metric') || '').slice(0, 20);
         try {
-            const result = await sources.fetchRanking(sourceId, period);
+            const result = await sources.fetchRanking(sourceId, period, { metric });
             const count = result.videos.length;
-            console.log(`[API] ${sourceId} ${result.period && result.period.id} ok=${result.ok} videos=${count}${result.cached ? ' cached' : ''}${result.fallback ? ' fallback' : ''}`);
+            console.log(`[API] ${sourceId} ${result.period && result.period.id}${result.metric ? ` ${result.metric}` : ''} ok=${result.ok} videos=${count}${result.cached ? ' cached' : ''}${result.fallback ? ' fallback' : ''}`);
             sendJson(res, 200, result);
         } catch (err) {
             sendJson(res, err.status || 500, { ok: false, error: err.message, videos: [] });
@@ -114,7 +115,8 @@ async function handle(req, res) {
         const id = url.searchParams.get('id') || '';
         try {
             const result = await sources.resolvePlayback(sourceId, id, { fresh: url.searchParams.get('fresh') === '1' });
-            sendJson(res, result.ok ? 200 : 502, result);
+            // "unavailable" is a definite answer (media deleted), not a relay error.
+            sendJson(res, result.ok || result.unavailable ? 200 : 502, result);
         } catch (err) {
             sendJson(res, err.status || 500, { ok: false, error: err.message, playback: null });
         }

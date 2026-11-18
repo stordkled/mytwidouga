@@ -1,8 +1,9 @@
-const CACHE_NAME = 'twivideo-shorts-v8';
+const CACHE_NAME = 'twivideo-shorts-v9';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
     '/src/style.css',
+    '/src/feed-logic.js',
     '/src/main.js',
     '/manifest.webmanifest',
     'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+JP:wght@400;500;700;900&display=swap',

@@ -1,7 +1,7 @@
 const { loadHtml, cleanText, absUrl } = require('../lib/html');
-const { getText, responseFailure } = require('../lib/http');
+const { getText, responseFailure, probeMedia } = require('../lib/http');
 const { withMirror, activeBase } = require('../lib/mirrors');
-const { bestVideo, firstThumb } = require('../lib/twimg');
+const { bestVideo, allVideos, sortVideos, firstThumb, videoUrl } = require('../lib/twimg');
 
 // Twihozon is plain server-rendered HTML. Each ranking card links to
 // /play-<id>-video.html and carries the pbs.twimg.com thumbnail and the
@@ -11,6 +11,18 @@ const { bestVideo, firstThumb } = require('../lib/twimg');
 // The card markup is not pinned to class names: a card is the largest
 // element around a play link that contains no other video's play link.
 // If a card has no MP4 in the listing, playback resolves from its play page.
+//
+// Checked live on 2026-11-18: every board still lists tweets from April
+// 2025, and their video.twimg.com MP4s answer 403 in every resolution
+// (the media is gone upstream; thumbnails still load). TwiKeep MP4s from
+// the same CDN play, so this is not a Referer or signing problem. Resolve
+// therefore probes each candidate MP4 and reports `unavailable` instead of
+// handing the player a URL that stays at readyState 0.
+//
+// Card titles are the tweet text cut to ~50 chars, and many tweets are
+// only a t.co link. The top page also carries the full records in an
+// HTML comment (`var userinfo = <urlencoded JSON>`), which has the full
+// text and every MP4 variant; both are used when present.
 
 const DEFAULT_BASES = ['https://www.twihozon.org'];
 const ORIGIN = DEFAULT_BASES[0];
@@ -100,17 +112,72 @@ function parseCard(card) {
     // must be a segment of its own (so a following date is not read as one).
     const after = viewMatch ? segmented.slice(viewMatch.index + viewMatch[0].length) : '';
     const saves = viewMatch ? numberText(after.match(/^\s*([\d,]+)(?=\s|$)/)?.[1]) : '';
-    const title = cleanText(viewMatch ? segmented.slice(0, viewMatch.index) : segmented)
+    const title = cleanTitle(viewMatch ? segmented.slice(0, viewMatch.index) : segmented);
+    return { views, saves, title };
+}
+
+// t.co ids are alphanumeric; text glued after one (…AtXE動画) must survive.
+function cleanTitle(text) {
+    return cleanText(String(text || ''))
         .replace(/動画を保存する/g, '')
-        .replace(/https?:\/\/t\.co\/\S+/g, '')
+        .replace(/https?:\/\/t\.co\/[A-Za-z0-9]+/g, '')
         .replace(/\s+/g, ' ')
         .trim()
         .slice(0, 140);
-    return { views, saves, title };
+}
+
+const TRUNCATED = /(?:\.\.\.|…)$/;
+
+// Card text first; the full tweet text when the card is empty or cut off.
+function pickTitle(cardTitle, fullText) {
+    const full = cleanTitle(fullText);
+    if (!cardTitle) return full;
+    if (full && TRUNCATED.test(cardTitle) && full.length >= cardTitle.replace(TRUNCATED, '').length) return full;
+    return cardTitle;
+}
+
+// <!-- <script> var userinfo = %7B…%7D; … </script> --> on the board pages.
+// Keys are play ids. Form-encoded: "+" is a space, a real "+" is %2B.
+function parseUserInfo(html) {
+    const out = new Map();
+    const match = String(html || '').match(/var\s+userinfo\s*=\s*(%7B[A-Za-z0-9%._~+\-*!'()]*?%7D)\s*;/i);
+    if (!match) return out;
+    let data;
+    try {
+        data = JSON.parse(decodeURIComponent(match[1].replace(/\+/g, ' ')));
+    } catch {
+        return out;
+    }
+    if (!data || typeof data !== 'object') return out;
+    for (const [key, item] of Object.entries(data)) {
+        if (!/^\d{1,12}$/.test(key) || !item || typeof item !== 'object') continue;
+        const variants = item.video_urls && typeof item.video_urls === 'object'
+            ? sortVideos(Object.values(item.video_urls).map(videoUrl).filter(Boolean))
+            : [];
+        out.set(key, {
+            fullText: typeof item.full_text === 'string' ? item.full_text.slice(0, 1000) : '',
+            tweetId: /^\d{5,25}$/.test(String(item.tid || '')) ? String(item.tid) : '',
+            screenName: /^[A-Za-z0-9_]{1,30}$/.test(String(item.screen_name || '')) ? item.screen_name : '',
+            variants,
+        });
+    }
+    return out;
+}
+
+// MP4 variants seen on the boards, by play id, for resolvePlayback. Bounded.
+const knownVariants = new Map();
+const MAX_KNOWN = 1000;
+
+function rememberVariants(id, urls) {
+    if (!urls || urls.length === 0) return;
+    knownVariants.delete(id);
+    knownVariants.set(id, urls.slice(0, 8));
+    while (knownVariants.size > MAX_KNOWN) knownVariants.delete(knownVariants.keys().next().value);
 }
 
 function parseListing(html, base = ORIGIN) {
     const source = String(html || '');
+    const info = parseUserInfo(source);
     const root = loadHtml(source);
     const order = [];
     const firstLink = new Map();
@@ -136,12 +203,21 @@ function parseListing(html, base = ORIGIN) {
             videoUrl = videoUrl || bestVideo(slice);
             thumb = thumb || firstThumb(slice);
         }
-        const { views, saves, title } = parseCard(card);
+        const { views, saves, title: cardTitle } = parseCard(card);
+        const record = info.get(id);
+        if (record) rememberVariants(id, record.variants);
+        const title = pickTitle(cardTitle, record && record.fullText);
         const author = cleanText(card.querySelector(SELECTORS.author)?.text || '');
         const page = absUrl(`/play-${id}-video.html`, base + '/');
+        // A tweet that is only a t.co link has no text anywhere on the site
+        // (the play page <title>/<h1> repeat the link), so name the poster.
+        const handle = record && record.screenName ? `@${record.screenName}` : '';
+        const fallback = author
+            ? `${author}${handle ? ` (${handle})` : ''} の動画`
+            : (handle ? `${handle} の動画` : '');
         videos.push({
             id,
-            title: title || (author ? `${author} の動画` : ''),
+            title: title || fallback,
             author,
             views: [
                 views ? `${Number(views).toLocaleString('ja-JP')} 回表示` : '',
@@ -162,6 +238,26 @@ function parsePlayPage(html) {
     return bestVideo(html) || null;
 }
 
+// "<tweet text>動画を簡単に保存" in <h1>, "<tweet text>動画保存_簡単!｜…" in <title>.
+function parsePlayTitle(html) {
+    const root = loadHtml(String(html || ''));
+    const heading = cleanText(root.querySelector('h1')?.text || '').replace(/動画を簡単に保存$/, '');
+    const title = cleanText(root.querySelector('title')?.text || '').replace(/動画保存_簡単!?[｜|].*$/, '');
+    return cleanTitle(heading) || cleanTitle(title);
+}
+
+const MAX_PROBES = 6;
+
+function transientStatus(status) {
+    return status === 0 || status === 408 || status === 429 || status >= 500;
+}
+
+function unavailable(message) {
+    const error = new Error(message);
+    error.unavailable = true;
+    return error;
+}
+
 async function fetchRanking(periodId) {
     const period = PERIODS[periodId];
     if (!period) throw new Error(`twihozon has no period ${periodId}`);
@@ -178,15 +274,33 @@ async function fetchRanking(periodId) {
 
 async function resolvePlayback(id) {
     if (!/^\d{1,12}$/.test(id)) throw new Error('Invalid Twihozon video id');
-    const { result } = await withMirror('twihozon', DEFAULT_BASES, async (base) => {
+    const { result: html } = await withMirror('twihozon', DEFAULT_BASES, async (base) => {
         const response = await getText(`${base}/play-${id}-video.html`, { timeout: 12000, referer: `${base}/` });
         const failure = responseFailure(response);
         if (failure) throw new Error(failure);
-        const url = parsePlayPage(response.text);
-        if (!url) throw new Error('no video.twimg.com MP4 on the play page');
-        return url;
+        return response.text;
     });
-    return { kind: 'file', url: result };
+    const title = parsePlayTitle(html);
+    // The play page names one variant; the board data may list the others.
+    const candidates = [...new Set([...allVideos(html), ...(knownVariants.get(id) || [])])].slice(0, MAX_PROBES);
+    if (candidates.length === 0) throw unavailable('no video.twimg.com MP4 on the play page');
+    const statuses = [];
+    for (const url of candidates) {
+        const probe = await probeMedia(url, { timeout: 6000 });
+        if (probe.ok) return withTitle({ kind: 'file', url }, title);
+        statuses.push(probe.status);
+    }
+    // A probe that could not reach the CDN (0) or got a transient
+    // 408/429/5xx says nothing about the media: let the player's own ladder
+    // try the best URL instead of calling it deleted and skipping it.
+    if (statuses.some(transientStatus)) {
+        return withTitle({ kind: 'file', url: candidates[0] }, title);
+    }
+    throw unavailable(`video.twimg.com answered HTTP ${[...new Set(statuses)].join('/')} for all ${candidates.length} MP4 variants (deleted upstream)`);
+}
+
+function withTitle(playback, title) {
+    return title ? { ...playback, title } : playback;
 }
 
 module.exports = {
@@ -205,6 +319,9 @@ module.exports = {
     resolvePlayback,
     parseListing,
     parsePlayPage,
+    parsePlayTitle,
+    parseUserInfo,
+    knownVariants,
     SELECTORS,
     PERIODS,
 };

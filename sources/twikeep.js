@@ -36,6 +36,12 @@ function currentMetric() {
     return Object.hasOwn(METRICS, metric) ? metric : DEFAULT_METRIC;
 }
 
+// A metric the client asked for (/api/videos?metric=views), else the default.
+function resolveMetric(requested) {
+    const metric = String(requested || '').trim().toLowerCase();
+    return Object.hasOwn(METRICS, metric) ? metric : currentMetric();
+}
+
 function rankingUrl(base, periodId, metric = currentMetric()) {
     const period = PERIODS[periodId];
     if (!period) throw new Error(`twikeep has no period ${periodId}`);
@@ -96,9 +102,9 @@ function parseRanking(body, metric = DEFAULT_METRIC) {
     return videos;
 }
 
-async function fetchRanking(periodId) {
+async function fetchRanking(periodId, options = {}) {
     if (!PERIODS[periodId]) throw new Error(`twikeep has no period ${periodId}`);
-    const metric = currentMetric();
+    const metric = resolveMetric(options.metric);
     const { result } = await withMirror('twikeep', DEFAULT_BASES, async (base) => {
         const response = await getText(rankingUrl(base, periodId, metric), {
             timeout: 12000,
@@ -121,6 +127,10 @@ module.exports = {
     homepage: ORIGIN + '/',
     bases: DEFAULT_BASES,
     periods: Object.entries(PERIODS).map(([id, period]) => ({ id, label: period.label })),
+    metrics: [
+        { id: 'downloads', label: '保存数' },
+        { id: 'views', label: '表示数' },
+    ],
     mediaHosts: ['twimg.com'],
     mediaReferer: 'https://x.com/',
     timeoutMs: 30000,
@@ -128,6 +138,7 @@ module.exports = {
     parseRanking,
     rankingUrl,
     currentMetric,
+    resolveMetric,
     PERIODS,
     METRICS,
 };

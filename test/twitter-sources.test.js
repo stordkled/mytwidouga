@@ -124,11 +124,20 @@ test('twihozon saved top-page HTML yields 20 ordered cards that resolve via thei
 
     assert.equal(first.thumbUrl, 'https://pbs.twimg.com/amplify_video_thumb/1914335359569391616/img/ACBmSW29d8cll4cG.jpg');
     assert.equal(first.author, '夜雨声烦');
-    assert.equal(first.title, '夜雨声烦 の動画', 'a bare t.co link is not a title');
+    assert.equal(first.title, '夜雨声烦 (@992ultra) の動画', 'a bare t.co link is not a title; the tweet has no other text');
     assert.equal(first.views, '235,086 回表示 · 3,900 保存');
 
     assert.equal(second.thumbUrl, 'https://pbs.twimg.com/amplify_video_thumb/1913595915182776320/img/8jZNkdvjivuzYoE9.jpg');
-    assert.equal(second.title, '夜雨声烦 の動画');
+    assert.equal(second.title, '夜雨声烦 (@992ultra) の動画');
+    // Cards cut the tweet text at ~50 chars ("…知りた..."); the page's
+    // userinfo record has the whole text.
+    assert.equal(videos[16].id, '14712');
+    assert.equal(videos[16].title, 'RT @linguisticszx: 広末さん逮捕と生活保護窓口の闇を知りたい?');
+    assert.equal(videos[18].id, '14713');
+    assert.equal(videos[18].title, 'RT @linguisticszx: 配信活動終了より動画の続き気になる人はリプ?');
+    assert.equal(videos[17].title, 'RT @linguisticszx: Mood', 'an untruncated card title is kept');
+    const fallbackTitles = videos.filter((video) => / の動画$/.test(video.title));
+    assert.equal(fallbackTitles.length, 15, 'only the 15 tweets that are just a t.co link have no text');
     assert.equal(second.views, '284,571 回表示 · 2,544 保存', 'the preceding t.co suffix 8 must not join the count');
     assert.equal(videos[5].views, '162,794 回表示 · 1,463 保存', 'the preceding t.co suffix 2 must not join the count');
 
@@ -183,6 +192,8 @@ test('twihozon board fetches and playback resolution use saved HTTP response bod
         ['https://www.twihozon.org/play-14725-video.html', twihozonPlayHtml],
     ]);
     await withFetch((url) => {
+        // resolvePlayback probes the MP4 with a one-byte range request.
+        if (url === twihozonMp4) return { status: 206, body: 'x', type: 'video/mp4' };
         assert.ok(pages.has(url), `unexpected request: ${url}`);
         return { body: pages.get(url) };
     }, async (calls) => {
@@ -196,11 +207,87 @@ test('twihozon board fetches and playback resolution use saved HTTP response bod
         }
         const playback = await twihozon.resolvePlayback(first.id);
         assert.deepEqual(playback, { kind: 'file', url: twihozonMp4 });
-        assert.equal(calls.at(-1).url, first.pageUrl);
+        assert.equal(calls.at(-2).url, first.pageUrl);
+        assert.equal(calls.at(-1).url, twihozonMp4);
+        assert.equal(calls.at(-1).headers.Range, 'bytes=0-0');
+        assert.equal(calls.at(-1).headers.Referer, undefined, 'probed like the player: no Referer');
         const [video] = finalizeVideos([{ ...first, playback }]);
         assert.equal(video.playback.referer, null, 'resolved MP4 starts on the direct playback step');
         await assert.rejects(() => twihozon.resolvePlayback('../x'), /Invalid/);
-        assert.equal(calls.length, 4, 'invalid ids make no HTTP request');
+        assert.equal(calls.length, 5, 'invalid ids make no HTTP request');
+    });
+});
+
+test('twihozon userinfo data carries every MP4 variant, the tweet id and the handle', () => {
+    const info = twihozon.parseUserInfo(twihozonHtml);
+    assert.equal(info.size, 20);
+    const record = info.get('14725');
+    assert.equal(record.tweetId, '1914339872619610170');
+    assert.equal(record.screenName, '992ultra');
+    assert.deepEqual(record.variants.map((url) => url.match(/avc1\/(\d+x\d+)/)[1]), [
+        '1920x1080', '1280x720', '640x360', '480x270',
+    ]);
+    assert.equal(info.get('14712').fullText, 'RT @linguisticszx: https://t.co/cg5aO4aLud\n広末さん逮捕と生活保護窓口の闇を知りたい?');
+    assert.equal(twihozon.parseUserInfo('<html>no data</html>').size, 0);
+    assert.equal(twihozon.parseUserInfo('var userinfo = %7Bbroken%7D;').size, 0);
+});
+
+test('twihozon play-page title: the saved page has only a t.co link, real text is kept', () => {
+    assert.equal(twihozon.parsePlayTitle(twihozonPlayHtml), '');
+    assert.equal(
+        twihozon.parsePlayTitle('<title>ねこの日https://t.co/AbCdEf1234動画保存_簡単!｜Twitter動画ダウンローダーTwihozon</title><h1>ねこの日https://t.co/AbCdEf1234動画を簡単に保存</h1>'),
+        'ねこの日'
+    );
+});
+
+// Live check 2026-11-18: video.twimg.com answered 403 for 4 of 4 sampled
+// Twihozon MP4s (1080p and 270p of 14725, 14714, 14711) while a TwiKeep
+// MP4 from the same CDN downloaded. Resolve must not hand those to the player.
+test('twihozon resolve probes variants: skips a dead one, reports all-dead as unavailable', async () => {
+    twihozon.parseListing(twihozonHtml); // remembers the board's variants
+    const play = 'https://www.twihozon.org/play-14725-video.html';
+    const hd = 'https://video.twimg.com/amplify_video/1914335359569391616/vid/avc1/1280x720/RV5c_oRgYmsgErei.mp4?tag=16';
+
+    await withFetch((url) => {
+        if (url === play) return { body: twihozonPlayHtml };
+        if (url === hd) return { status: 206, body: 'x', type: 'video/mp4' };
+        return { status: 403, body: '', type: 'text/plain' };
+    }, async (calls) => {
+        const playback = await twihozon.resolvePlayback('14725');
+        assert.deepEqual(playback, { kind: 'file', url: hd }, 'the 1080p variant is 403, the 720p one plays');
+        assert.deepEqual(calls.slice(1).map((call) => call.url), [twihozonMp4, hd]);
+    });
+
+    await withFetch((url) => {
+        if (url === play) return { body: twihozonPlayHtml };
+        return { status: 403, body: '', type: 'text/plain' };
+    }, async (calls) => {
+        await assert.rejects(() => twihozon.resolvePlayback('14725'), (err) => {
+            assert.equal(err.unavailable, true);
+            assert.match(err.message, /HTTP 403 for all 4 MP4 variants/);
+            return true;
+        });
+        assert.equal(calls.length, 5, 'play page + four variants, no more');
+
+        const viaRegistry = await sources.resolvePlayback('twihozon', '14725', { fresh: true });
+        assert.equal(viaRegistry.ok, false);
+        assert.equal(viaRegistry.unavailable, true, 'the client skips instead of waiting at readyState 0');
+        assert.equal(viaRegistry.playback, null);
+    });
+
+    await withFetch((url) => {
+        if (url === play) return { body: twihozonPlayHtml };
+        throw new TypeError('fetch failed');
+    }, async () => {
+        const playback = await twihozon.resolvePlayback('14725');
+        assert.deepEqual(playback, { kind: 'file', url: twihozonMp4 }, 'an unreachable CDN is not proof the media is gone');
+    });
+
+    await withFetch((url) => {
+        if (url === 'https://www.twihozon.org/play-777-video.html') return { body: '<html><h1>x</h1></html>' };
+        throw new Error(`unexpected ${url}`);
+    }, async () => {
+        await assert.rejects(() => twihozon.resolvePlayback('777'), (err) => err.unavailable === true);
     });
 });
 

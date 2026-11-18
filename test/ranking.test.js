@@ -192,7 +192,7 @@ test('tokyomotion cards and vsrc playback', () => {
     assert.equal(tokyomotion.getEmbedUrl({ id: '1', embedToken: token }), 'https://www.tokyomotion.net/embed/ae4cf059a153ca9875eb');
 });
 
-test('missav cards and surrit playlist id', () => {
+test('missav ranking cards', () => {
     const html = `
       <div class="thumbnail group">
         <a href="https://missav.ws/ja/dldss-575">
@@ -206,11 +206,7 @@ test('missav cards and surrit playlist id', () => {
     assert.equal(videos[0].title, '題名');
     assert.equal(videos[0].duration, '2:45:54');
     assert.equal(videos[0].thumbUrl, 'https://fourhoi.com/dldss-575/cover-t.jpg');
-    const packed = String.raw`https:\/\/surrit.com\/96d8d22e-6c4c-455a-82e6-2f01f3c4c609\/seek\/_0.jpg`;
-    assert.equal(
-        missav.extractPlaylist(packed),
-        'https://surrit.com/96d8d22e-6c4c-455a-82e6-2f01f3c4c609/playlist.m3u8'
-    );
+    assert.equal(videos[0].playback.kind, 'resolve');
 });
 
 test('registry exposes the seven sources and only their periods', () => {

@@ -43,25 +43,49 @@ for (const adapter of adapters) {
 // Bounded: resolve keys are per video id and would otherwise grow forever.
 const rankingCache = new TtlCache({ maxEntries: 100 });
 const resolveCache = new TtlCache({ maxEntries: 500 });
+// Consecutive ranking failures per source. Every failure counts once, a
+// block page included: one Cloudflare page (or one timeout) is often
+// transient and must not hide a source. After hideAfterFailures failures in
+// a row the source is hidden for hiddenRetryMs, then offered again; one
+// success clears the record, and one more failure hides it again.
 const sourceFailures = new Map();
 
-function noteSourceResult(sourceId, ok, message) {
+function noteSourceResult(sourceId, ok, message, now = Date.now()) {
     if (ok) {
-        sourceFailures.set(sourceId, { count: 0, blocked: false });
+        sourceFailures.delete(sourceId);
         return;
     }
+    const settings = mirrors.settings();
     const blocked = /block page|cloudflare|attention required|just a moment|しばらくお待ち/i.test(message || '');
-    const previous = sourceFailures.get(sourceId) || { count: 0, blocked: false };
-    const bump = blocked ? mirrors.settings().hideAfterFailures : 1;
-    sourceFailures.set(sourceId, { count: previous.count + bump, blocked: blocked || previous.blocked });
+    let previous = sourceFailures.get(sourceId) || { count: 0, blocked: false, lastFailureAt: 0, hiddenUntil: 0 };
+    // Failures far apart are not a streak.
+    if (previous.count > 0 && !previous.hiddenUntil && now - previous.lastFailureAt > settings.hiddenRetryMs) {
+        previous = { count: 0, blocked: false, lastFailureAt: 0, hiddenUntil: 0 };
+    }
+    const count = previous.count + 1;
+    sourceFailures.set(sourceId, {
+        count,
+        blocked: blocked || previous.blocked,
+        lastFailureAt: now,
+        hiddenUntil: count >= settings.hideAfterFailures ? now + settings.hiddenRetryMs : 0,
+    });
 }
 
-function sourceHidden(sourceId) {
+function sourceHidden(sourceId, now = Date.now()) {
     if (mirrors.hiddenFor(sourceId)) return true;
     if (!mirrors.settings().hideFailedSources) return false;
     const record = sourceFailures.get(sourceId);
-    if (!record) return false;
-    return record.count >= mirrors.settings().hideAfterFailures;
+    if (!record || !record.hiddenUntil) return false;
+    return record.hiddenUntil > now;
+}
+
+function failureState(sourceId) {
+    const record = sourceFailures.get(sourceId);
+    return record ? { ...record } : null;
+}
+
+function resetFailures() {
+    sourceFailures.clear();
 }
 
 function friendlyFailure(name, raw) {
@@ -110,14 +134,27 @@ function embedFor(adapter, video) {
     }
 }
 
+function metricFor(adapter, requested) {
+    if (typeof adapter.resolveMetric !== 'function') return null;
+    return adapter.resolveMetric(requested);
+}
+
 function publicSource(adapter) {
-    return {
+    const out = {
         id: adapter.id,
         name: adapter.name,
         color: adapter.color || '#ffffff',
         hidden: sourceHidden(adapter.id),
         periods: adapter.periods.map((period) => ({ id: period.id, label: period.label })),
     };
+    // Hidden only for a while (failure streak, not config): tell the client
+    // so an open page re-checks /api/sources and shows it again later.
+    if (out.hidden && !mirrors.hiddenFor(adapter.id)) out.retryLater = true;
+    if (Array.isArray(adapter.metrics) && adapter.metrics.length > 1) {
+        out.metrics = adapter.metrics.map((metric) => ({ id: metric.id, label: metric.label }));
+        out.defaultMetric = metricFor(adapter, '');
+    }
+    return out;
 }
 
 function playbackConfig() {
@@ -171,7 +208,13 @@ function errorMessage(err) {
     return message.replace(/\s+/g, ' ').slice(0, 400);
 }
 
-async function fetchRanking(sourceId, requestedPeriod) {
+// Key for one board. A source with metrics (TwiKeep 保存数/表示数) keeps one
+// entry per metric, so switching metric never serves the other board.
+function rankingCacheKey(sourceId, periodId, metric) {
+    return metric ? `${sourceId}:${periodId}:${metric}` : `${sourceId}:${periodId}`;
+}
+
+async function fetchRanking(sourceId, requestedPeriod, options = {}) {
     const adapter = byId.get(sourceId);
     if (!adapter) {
         const error = new Error(`Unknown source "${sourceId}"`);
@@ -179,13 +222,14 @@ async function fetchRanking(sourceId, requestedPeriod) {
         throw error;
     }
     const resolved = resolvePeriod(adapter.periods, requestedPeriod);
-    const cacheKey = `${adapter.id}:${resolved.period.id}`;
+    const metric = metricFor(adapter, options.metric);
+    const cacheKey = rankingCacheKey(adapter.id, resolved.period.id, metric);
     const ttl = adapter.cacheTtlMs || mirrors.settings().cacheTtlMs;
     const timeout = adapter.timeoutMs || mirrors.settings().requestTimeoutMs;
     try {
         const loaded = await rankingCache.getOrLoad(cacheKey, ttl, async () => {
             const videos = await withTimeout(
-                Promise.resolve(adapter.fetchRanking(resolved.period.id)),
+                Promise.resolve(adapter.fetchRanking(resolved.period.id, metric ? { metric } : {})),
                 timeout,
                 adapter.name
             );
@@ -193,10 +237,13 @@ async function fetchRanking(sourceId, requestedPeriod) {
             if (finalized.length === 0) {
                 throw new Error(`${adapter.name} returned an empty ranking`);
             }
-            return finalized;
+            // An adapter may say it showed a substitute board (TokyoMotion
+            // 今日 is empty → 今週).
+            const notice = videos && typeof videos.notice === 'string' ? videos.notice : '';
+            return { videos: finalized, notice };
         });
         noteSourceResult(adapter.id, true);
-        return {
+        const result = {
             ok: true,
             cached: loaded.cached,
             source: publicSource(adapter),
@@ -204,13 +251,16 @@ async function fetchRanking(sourceId, requestedPeriod) {
             requestedPeriod: resolved.requestedPeriod,
             fallback: resolved.fallback,
             fallbackReason: resolved.fallbackReason,
-            videos: loaded.value,
+            notice: loaded.value.notice || null,
+            videos: loaded.value.videos,
         };
+        if (metric) result.metric = metric;
+        return result;
     } catch (err) {
         console.error(`[${adapter.id}] ${resolved.period.id} failed:`, err.message);
         const raw = errorMessage(err);
         noteSourceResult(adapter.id, false, raw);
-        return {
+        const result = {
             ok: false,
             cached: false,
             source: publicSource(adapter),
@@ -219,11 +269,24 @@ async function fetchRanking(sourceId, requestedPeriod) {
             fallback: resolved.fallback,
             fallbackReason: resolved.fallback ? resolved.fallbackReason : null,
             error: friendlyFailure(adapter.name, raw),
+            reason: failureReason(raw),
             detail: raw,
             hidden: sourceHidden(adapter.id),
             videos: [],
         };
+        if (metric) result.metric = metric;
+        return result;
     }
+}
+
+// Short category for the UI note when it moves to another source.
+function failureReason(raw) {
+    const text = String(raw || '');
+    if (/block page|cloudflare|attention required|just a moment|しばらくお待ち/i.test(text)) return 'blocked';
+    if (/timed out|timeout|aborted/i.test(text)) return 'timeout';
+    if (/empty ranking|no ranking cards|no ranking items|empty board/i.test(text)) return 'empty';
+    if (/HTTP \d{3}/.test(text)) return 'http';
+    return 'error';
 }
 
 async function resolvePlayback(sourceId, videoId, options = {}) {
@@ -262,6 +325,17 @@ async function resolvePlayback(sourceId, videoId, options = {}) {
                 via: 'embed',
             };
         }
+        if (err && err.unavailable) {
+            // Definitive (e.g. the CDN answers 403 for every variant): the
+            // client skips to the next video instead of waiting on a dead URL.
+            return {
+                ok: false,
+                unavailable: true,
+                error: '元の動画が削除されているため再生できません',
+                detail: errorMessage(err),
+                playback: null,
+            };
+        }
         return { ok: false, error: errorMessage(err), playback: null };
     }
 }
@@ -289,4 +363,10 @@ module.exports = {
     fetchRanking,
     resolvePlayback,
     lookupExternal,
+    rankingCacheKey,
+    noteSourceResult,
+    sourceHidden,
+    failureState,
+    failureReason,
+    resetFailures,
 };

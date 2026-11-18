@@ -11,10 +11,16 @@ const periodNote = document.getElementById('periodNote');
 
 const STORAGE_SOURCE = 'shorts.source';
 const STORAGE_PERIOD = 'shorts.period.';
+const STORAGE_METRIC = 'shorts.metric.';
+const Logic = window.FeedLogic;
 
 let sources = [];
 let currentSource = null;
 let currentPeriod = '';
+let currentMetric = '';
+// Sources that failed since the user last picked one; automatic switching
+// never goes back to them (or to hidden ones), so an all-failed state stops.
+const failedChain = new Set();
 let videos = [];
 let isMuted = true;
 let currentVideoIndex = 0;
@@ -136,8 +142,17 @@ function setFallbackNote(text) {
 }
 
 function visibleSources() {
-    const shown = sources.filter((source) => !source.hidden);
-    return shown.length ? shown : sources;
+    return Logic.barSources(sources, currentSource && currentSource.id);
+}
+
+function selectSource(source, remember) {
+    currentSource = source;
+    const saved = localStorage.getItem(STORAGE_PERIOD + source.id);
+    currentPeriod = source.periods.some((period) => period.id === saved)
+        ? saved
+        : source.periods[0].id;
+    currentMetric = Logic.pickMetric(source, localStorage.getItem(STORAGE_METRIC + source.id));
+    if (remember) localStorage.setItem(STORAGE_SOURCE, source.id);
 }
 
 function renderSourceBar() {
@@ -151,18 +166,18 @@ function renderSourceBar() {
         button.setAttribute('aria-pressed', source.id === currentSource.id ? 'true' : 'false');
         button.addEventListener('click', () => {
             if (source.id === currentSource.id) return;
-            currentSource = source;
-            const saved = localStorage.getItem(STORAGE_PERIOD + source.id);
-            currentPeriod = source.periods.some((period) => period.id === saved)
-                ? saved
-                : source.periods[0].id;
-            localStorage.setItem(STORAGE_SOURCE, source.id);
+            failedChain.clear();
+            selectSource(source, true);
             renderSourceBar();
             renderPeriodBar();
             loadVideos();
         });
         sourceBar.appendChild(button);
     });
+}
+
+function metricIcon(id) {
+    return id === 'views' ? 'fa-eye' : 'fa-download';
 }
 
 function renderPeriodBar() {
@@ -182,6 +197,24 @@ function renderPeriodBar() {
         });
         bottomNav.appendChild(button);
     });
+    // TwiKeep ranks by 保存数 or 表示数; one button flips between them.
+    const metrics = currentSource.metrics || [];
+    if (metrics.length > 1 && currentMetric) {
+        const active = metrics.find((metric) => metric.id === currentMetric) || metrics[0];
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'nav-btn metric-btn active';
+        button.title = 'ランキングの基準を切り替え';
+        button.innerHTML = `<i class="fas ${metricIcon(active.id)}"></i><span></span>`;
+        button.querySelector('span').textContent = active.label;
+        button.addEventListener('click', () => {
+            currentMetric = Logic.nextMetric(metrics, currentMetric);
+            localStorage.setItem(STORAGE_METRIC + currentSource.id, currentMetric);
+            renderPeriodBar();
+            loadVideos();
+        });
+        bottomNav.appendChild(button);
+    }
 }
 
 function showMessage(title, message, onRetry) {
@@ -379,18 +412,50 @@ function startProgressTracking(media, index) {
     media.addEventListener('timeupdate', update);
 }
 
+function sourceOf(video) {
+    return (video && video._sourceId) || currentSource.id;
+}
+
 async function resolvePlayback(video, fresh) {
     if (video.playback.kind !== 'resolve') return video.playback;
-    const response = await fetch(`/api/resolve?source=${encodeURIComponent(currentSource.id)}&id=${encodeURIComponent(video.id)}${fresh ? '&fresh=1' : ''}`);
+    const response = await fetch(Logic.resolveUrl(sourceOf(video), video.id, fresh));
     const data = await response.json();
     if (!data.ok || !data.playback) {
         if (video.playback.embedUrl) {
             return { kind: 'embed', url: video.playback.embedUrl, embedUrl: video.playback.embedUrl };
         }
-        throw new Error(data.error || '再生情報を取得できませんでした');
+        const error = new Error(data.error || '再生情報を取得できませんでした');
+        error.unavailable = Boolean(data.unavailable);
+        throw error;
     }
     if (data.playback.embedUrl) video.playback.embedUrl = data.playback.embedUrl;
     return data.playback;
+}
+
+// The card title from the play page when the listing had none.
+function applyResolvedTitle(card, video, playback) {
+    if (!playback || !playback.title || playback.title === video.title) return;
+    video.title = playback.title;
+    const node = card.querySelector('.info-title');
+    if (node) node.textContent = playback.title;
+}
+
+// A video that cannot play moves the feed on instead of sitting at
+// readyState 0 behind a spinner.
+const SKIP_DELAY_MS = 1200;
+
+function skipAfter(card, index, attempt, text) {
+    showCardMessage(card, text);
+    showPlayIcon(index, true, true);
+    setTimeout(() => {
+        if (!Logic.playbackCurrent(attempt, playbackState())) return;
+        const next = cardAt(index + 1);
+        if (next) next.scrollIntoView({ behavior: 'smooth' });
+    }, SKIP_DELAY_MS);
+}
+
+function playbackState() {
+    return { token: playToken, index: currentVideoIndex, sourceId: currentSource && currentSource.id };
 }
 
 function mountEmbed(card, embedUrl) {
@@ -449,6 +514,16 @@ function waitUntilPlaying(media, timeout = 15000) {
             return;
         }
         const timer = setTimeout(() => finish(media.readyState >= 1 && !media.error), timeout);
+        // A 403 MP4 can leave the element at readyState 0 without an error
+        // event; give up on it early instead of waiting out the timeout.
+        const started = Date.now();
+        const stall = setInterval(() => {
+            if (Logic.mediaStalled({
+                readyState: media.readyState,
+                networkState: media.networkState,
+                elapsedMs: Date.now() - started,
+            })) finish(false);
+        }, 1000);
         const ok = () => {
             if (media.error) {
                 finish(false);
@@ -457,8 +532,12 @@ function waitUntilPlaying(media, timeout = 15000) {
             if (media.currentTime > 0 || media.readyState >= 2) finish(true);
         };
         const bad = () => finish(false);
+        let settled = false;
         function finish(success) {
+            if (settled) return;
+            settled = true;
             clearTimeout(timer);
+            clearInterval(stall);
             media.removeEventListener('timeupdate', ok);
             media.removeEventListener('loadeddata', ok);
             media.removeEventListener('error', bad);
@@ -560,6 +639,7 @@ function clearMedia(card) {
 
 async function tryMode(mode, playback, card, index) {
     clearMedia(card);
+    const sourceId = sourceOf(videos[index]);
     const embedUrl = (playback && playback.embedUrl) || (videos[index] && videos[index].playback.embedUrl);
     if (mode === 'embed') {
         if (!embedUrl) return false;
@@ -572,9 +652,9 @@ async function tryMode(mode, playback, card, index) {
     if (mode === 'direct') {
         played = hls ? await mountHls(card, index, playback.url) : await mountFile(card, index, playback.url);
     } else if (mode === 'playlist-proxy' && hls) {
-        played = await mountHls(card, index, playlistProxy(currentSource.id, playback.url));
+        played = await mountHls(card, index, playlistProxy(sourceId, playback.url));
     } else if (mode === 'proxy') {
-        const proxied = mediaProxy(currentSource.id, playback.url);
+        const proxied = mediaProxy(sourceId, playback.url);
         played = hls ? await mountHls(card, index, proxied) : await mountFile(card, index, proxied);
     }
     return played;
@@ -607,17 +687,33 @@ async function playCard(index) {
         syncPlay = false;
     }
 
-    const forced = (playbackConfig.sources && playbackConfig.sources[currentSource.id]) || playbackConfig.mode || 'auto';
+    const sourceId = sourceOf(video);
+    // Everything below belongs to this attempt; a source switch, a new
+    // render or a scroll makes it stale and it must stop, including the
+    // one-time fresh re-resolve.
+    const attempt = { token, index, sourceId };
+    const current = () => Logic.playbackCurrent(attempt, playbackState());
+    const stale = card.querySelector('.card-message');
+    if (stale) stale.remove();
+
+    const forced = (playbackConfig.sources && playbackConfig.sources[sourceId]) || playbackConfig.mode || 'auto';
     let playback = video.playback;
     try {
         playback = await resolvePlayback(video, false);
     } catch (err) {
+        if (!current()) return;
+        if (err.unavailable) {
+            activePlay = -1;
+            skipAfter(card, index, attempt, '元の動画が削除されているため次へ進みます');
+            return;
+        }
         playback = { kind: 'embed', url: video.playback.embedUrl, embedUrl: video.playback.embedUrl, error: err.message };
     }
-    if (token !== playToken || currentVideoIndex !== index) return;
+    if (!current()) return;
+    applyResolvedTitle(card, video, playback);
 
     let modes = modesFor(forced, isHls(playback), playbackNeedsProxy(playback));
-    const known = sourceStrategy.get(currentSource.id);
+    const known = sourceStrategy.get(sourceId);
     if (known && !playback.needsReferer) {
         const at = modes.indexOf(known);
         if (at > 0) modes = modes.slice(at);
@@ -628,22 +724,38 @@ async function playCard(index) {
     for (let i = 0; i < modes.length && steps < MAX_LADDER_STEPS; i += 1) {
         const mode = modes[i];
         steps += 1;
-        if (token !== playToken || currentVideoIndex !== index) return;
+        if (!current()) return;
         await yieldToBrowser();
-        if (token !== playToken || currentVideoIndex !== index) return;
+        if (!current()) return;
         let ok = await tryMode(mode, playback, card, index);
-        if (!ok && mode !== 'embed' && !resolvedOnceMore && video.playback.kind === 'resolve') {
+        if (Logic.shouldReResolve({
+            ok,
+            mode,
+            alreadyResolved: resolvedOnceMore,
+            kind: video.playback.kind,
+            current: current(),
+        })) {
             resolvedOnceMore = true;
             try {
                 playback = await resolvePlayback(video, true);
-            } catch { /* keep the previous URL */ }
-            if (token !== playToken || currentVideoIndex !== index) return;
+            } catch (err) {
+                if (!current()) return;
+                if (err.unavailable) {
+                    clearMedia(card);
+                    activePlay = -1;
+                    skipAfter(card, index, attempt, '元の動画が削除されているため次へ進みます');
+                    return;
+                }
+                /* otherwise keep the previous URL */
+            }
+            if (!current()) return;
             modes = modesFor(forced, isHls(playback), playbackNeedsProxy(playback));
             i = -1;
             continue;
         }
+        if (!current()) return;
         if (ok) {
-            if (forced === 'auto') sourceStrategy.set(currentSource.id, mode);
+            if (forced === 'auto') sourceStrategy.set(sourceId, mode);
             showPlayIcon(index, false, false);
             const indicator = document.getElementById('scrollIndicator');
             if (indicator && index > 0) indicator.classList.add('hidden');
@@ -652,22 +764,22 @@ async function playCard(index) {
         }
         clearMedia(card);
     }
-    if (token !== playToken) return;
+    if (!current()) return;
     activePlay = -1;
-    showCardMessage(card, 'この動画を再生できませんでした');
-    showPlayIcon(index, true, true);
+    skipAfter(card, index, attempt, 'この動画を再生できませんでした。次へ進みます');
 }
 
 function preloadNext(index) {
     const next = videos[index + 1];
     const card = cardAt(index + 1);
     if (!next || !card || next._preloading || next._preloaded) return;
-    const mode = sourceStrategy.get(currentSource.id);
+    const sourceId = sourceOf(next);
+    const mode = sourceStrategy.get(sourceId);
     if (mode === 'proxy') return;
     next._preloading = true;
     resolvePlayback(next, false).then((playback) => {
         next._preloaded = true;
-        if (currentVideoIndex !== index) return;
+        if (currentVideoIndex !== index || !currentSource || currentSource.id !== sourceId) return;
         if (mode === 'embed' || (playback && playback.kind === 'embed')) {
             const embedUrl = (playback && (playback.embedUrl || playback.url)) || next.playback.embedUrl;
             if (embedUrl && !card.querySelector('iframe.embed-player')) mountEmbed(card, embedUrl);
@@ -860,52 +972,88 @@ function setupEventListeners() {
     });
 }
 
-async function loadVideos() {
+// Re-read the hidden flags from /api/sources. The server un-hides a source
+// after hiddenRetryMs; without this an open page would keep it out of the
+// bar (and out of the fallback candidates) until a reload.
+let sourcesRefreshedAt = 0;
+
+async function refreshSources(force) {
+    if (!force && !Logic.needsSourceRefresh(sources, sourcesRefreshedAt, Date.now())) return false;
+    sourcesRefreshedAt = Date.now();
+    try {
+        const response = await fetch('/api/sources');
+        const data = await response.json();
+        const before = sources.map((source) => `${source.id}:${source.hidden}`).join();
+        sources = Logic.mergeSourceStatus(sources, data.sources);
+        if (currentSource) currentSource = sources.find((source) => source.id === currentSource.id) || currentSource;
+        const changed = before !== sources.map((source) => `${source.id}:${source.hidden}`).join();
+        if (changed && currentSource) renderSourceBar();
+        return changed;
+    } catch {
+        return false;
+    }
+}
+
+setInterval(() => { refreshSources(false); }, Logic.SOURCES_REFRESH_MS);
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refreshSources(false);
+});
+
+async function retryCurrent() {
+    failedChain.clear();
+    await refreshSources(true);
+    loadVideos();
+}
+
+async function loadVideos(options = {}) {
     if (!currentSource) return;
     if (loadController) loadController.abort();
     loadController = new AbortController();
     const { signal } = loadController;
     const source = currentSource;
     const period = currentPeriod;
+    const metric = currentMetric;
+    // Why the feed is on this source (set when it switched by itself). It
+    // stays up with the board's own notes instead of being wiped here.
+    const switchNote = options.note || '';
     isLoading = true;
     stopAll();
-    setFallbackNote('');
+    setFallbackNote(switchNote);
     setLoading(true, `${source.name} を読み込み中...`);
 
     try {
-        const response = await fetch(`/api/videos?source=${encodeURIComponent(source.id)}&period=${encodeURIComponent(period)}`, { signal });
+        const response = await fetch(Logic.videosUrl(source.id, period, metric), { signal });
         const data = await response.json();
         if (signal.aborted || source.id !== currentSource.id) return;
         if (!data.ok) {
             if (data.source) {
-                const listed = sources.find((item) => item.id === data.source.id);
-                if (listed) listed.hidden = !!data.source.hidden;
+                sources = Logic.mergeSourceStatus(sources, [data.source]);
+                currentSource = sources.find((item) => item.id === source.id) || currentSource;
             }
-            if (data.hidden) {
+            failedChain.add(source.id);
+            const next = Logic.fallbackSource(sources, source.id, failedChain);
+            if (next) {
+                selectSource(next, false);
                 renderSourceBar();
-                const next = visibleSources().find((item) => item.id !== source.id);
-                if (next && visibleSources().some((item) => item.id === next.id) && sources.some((item) => item.hidden)) {
-                    currentSource = next;
-                    const savedPeriod = localStorage.getItem(STORAGE_PERIOD + next.id);
-                    currentPeriod = next.periods.some((period) => period.id === savedPeriod) ? savedPeriod : next.periods[0].id;
-                    localStorage.setItem(STORAGE_SOURCE, next.id);
-                    renderSourceBar();
-                    renderPeriodBar();
-                    setFallbackNote(`${source.name} はこのネットワークから開けないため非表示にしました`);
-                    setLoading(false);
-                    isLoading = false;
-                    loadVideos();
-                    return;
-                }
+                renderPeriodBar();
+                setLoading(false);
+                isLoading = false;
+                loadVideos({ note: Logic.switchNote(source.name, next.name, data.reason, !!data.hidden) });
+                return;
             }
-            showMessage(`${source.name} を読み込めませんでした`, data.error || '不明なエラー', () => loadVideos());
+            // Nothing left that has not failed: stop here (no more requests
+            // until the user retries or picks a source).
+            renderSourceBar();
+            setFallbackNote(switchNote);
+            showMessage(`${source.name} を読み込めませんでした`, data.error || Logic.reasonText(data.reason), retryCurrent);
             setLoading(false);
             return;
         }
-        videos = data.videos || [];
-        setFallbackNote(data.fallback ? data.fallbackReason : '');
+        failedChain.clear();
+        videos = (data.videos || []).map((video) => ({ ...video, _sourceId: source.id }));
+        setFallbackNote(Logic.joinNotes(switchNote, data.fallback ? data.fallbackReason : '', data.notice));
         if (videos.length === 0) {
-            showMessage('動画が見つかりませんでした', 'しばらくしてからもう一度お試しください', () => loadVideos());
+            showMessage('動画が見つかりませんでした', 'しばらくしてからもう一度お試しください', retryCurrent);
             setLoading(false);
             return;
         }
@@ -918,7 +1066,7 @@ async function loadVideos() {
         setLoading(false);
     } catch (err) {
         if (err.name === 'AbortError') return;
-        showMessage(`${source.name} を読み込めませんでした`, '通信エラーが発生しました。再読み込みしてください。', () => loadVideos());
+        showMessage(`${source.name} を読み込めませんでした`, '通信エラーが発生しました。再読み込みしてください。', retryCurrent);
         setLoading(false);
     } finally {
         isLoading = false;
@@ -949,17 +1097,14 @@ async function init() {
         const response = await fetch('/api/sources');
         const data = await response.json();
         sources = data.sources || [];
+        sourcesRefreshedAt = Date.now();
         playbackConfig = data.playback || playbackConfig;
         if (sources.length === 0) throw new Error('ソースがありません');
         const saved = localStorage.getItem(STORAGE_SOURCE);
         // A source hidden in config/sources.json is not offered, even if it
         // was the last one this browser used.
         const offered = visibleSources();
-        currentSource = offered.find((source) => source.id === saved) || offered[0];
-        const savedPeriod = localStorage.getItem(STORAGE_PERIOD + currentSource.id);
-        currentPeriod = currentSource.periods.some((period) => period.id === savedPeriod)
-            ? savedPeriod
-            : currentSource.periods[0].id;
+        selectSource(offered.find((source) => source.id === saved) || offered[0], false);
         renderSourceBar();
         renderPeriodBar();
         await loadVideos();
