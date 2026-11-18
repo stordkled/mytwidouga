@@ -113,6 +113,12 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    if (url.pathname === '/favicon.ico') {
+        res.writeHead(302, { Location: '/icons/icon-192.png' });
+        res.end();
+        return;
+    }
+
     if (url.pathname === '/proxy/media' || url.pathname === '/proxy/playlist') {
         const sourceId = url.searchParams.get('source') || '';
         const targetUrl = url.searchParams.get('url') || '';

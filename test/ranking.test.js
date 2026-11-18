@@ -77,10 +77,10 @@ test('proxy allowlist is per host suffix and rejects private targets', () => {
     assert.equal(isPublicHttpUrl('http://127.0.0.1/secret'), false);
     assert.equal(isPublicHttpUrl('http://169.254.169.254/latest'), false);
     assert.equal(isPublicHttpUrl('file:///etc/passwd'), false);
-    assert.equal(boundMediaRange('bytes=0-'), 'bytes=0-2097151');
-    assert.equal(boundMediaRange('bytes=5000000-'), 'bytes=5000000-7097151');
+    assert.equal(boundMediaRange('bytes=0-'), 'bytes=0-8388607');
+    assert.equal(boundMediaRange('bytes=5000000-'), 'bytes=5000000-13388607');
     assert.equal(boundMediaRange('bytes=0-100'), 'bytes=0-100');
-    assert.equal(boundMediaRange(''), 'bytes=0-2097151');
+    assert.equal(boundMediaRange(''), 'bytes=0-8388607');
 });
 
 test('twivideo cards become direct files', () => {

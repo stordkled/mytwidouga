@@ -49,15 +49,15 @@ self.addEventListener('install', (event) => {
     self.skipWaiting();
 });
 
-// Activate: drop old caches, take control, and reload open pages so they
-// don't keep running a main.js the previous worker cached.
+// Activate: drop old caches and take control. Do not navigate open pages
+// here. client.navigate() during activate deadlocks the renderer when a
+// long /proxy/media response is already in flight: the worker waits for the
+// navigation, and the navigation waits for this activate handler.
 self.addEventListener('activate', (event) => {
     event.waitUntil((async () => {
         const keys = await caches.keys();
         await Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)));
         await self.clients.claim();
-        const windows = await self.clients.matchAll({ type: 'window' });
-        await Promise.all(windows.map((client) => client.navigate(client.url)));
     })());
 });
 

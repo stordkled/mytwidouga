@@ -356,12 +356,14 @@ function showCardMessage(card, text) {
 
 function startProgressTracking(media, index) {
     const progressFill = document.getElementById(`progress-${index}`);
-    if (!progressFill) return;
+    if (!progressFill || media.dataset.progress === '1') return;
+    media.dataset.progress = '1';
     const update = () => {
-        if (media.duration) progressFill.style.width = ((media.currentTime / media.duration) * 100) + '%';
-        if (!media.paused) requestAnimationFrame(update);
+        const duration = media.duration;
+        if (!Number.isFinite(duration) || duration <= 0) return;
+        progressFill.style.width = ((media.currentTime / duration) * 100) + '%';
     };
-    requestAnimationFrame(update);
+    media.addEventListener('timeupdate', update);
 }
 
 function resolvedKey(video) {
@@ -465,22 +467,30 @@ function prepareVideo(media) {
     media.playsInline = true;
 }
 
-function waitUntilPlaying(media, timeout = 8000) {
+function waitUntilPlaying(media, timeout = 15000) {
     return new Promise((resolve) => {
         if (media.error) {
             resolve(false);
             return;
         }
-        const timer = setTimeout(() => finish(false), timeout);
-        const ok = () => finish(!media.error && media.currentTime > 0);
+        const timer = setTimeout(() => finish(media.readyState >= 1 && !media.error), timeout);
+        const ok = () => {
+            if (media.error) {
+                finish(false);
+                return;
+            }
+            if (media.currentTime > 0 || media.readyState >= 2) finish(true);
+        };
         const bad = () => finish(false);
         function finish(success) {
             clearTimeout(timer);
             media.removeEventListener('timeupdate', ok);
+            media.removeEventListener('loadeddata', ok);
             media.removeEventListener('error', bad);
             resolve(success);
         }
         media.addEventListener('timeupdate', ok);
+        media.addEventListener('loadeddata', ok);
         media.addEventListener('error', bad);
     });
 }
