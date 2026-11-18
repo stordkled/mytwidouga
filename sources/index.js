@@ -38,8 +38,9 @@ for (const adapter of adapters) {
     byId.set(adapter.id, adapter);
 }
 
-const rankingCache = new TtlCache();
-const resolveCache = new TtlCache();
+// Bounded: resolve keys are per video id and would otherwise grow forever.
+const rankingCache = new TtlCache({ maxEntries: 100 });
+const resolveCache = new TtlCache({ maxEntries: 500 });
 const sourceFailures = new Map();
 
 function noteSourceResult(sourceId, ok, message) {
@@ -54,6 +55,7 @@ function noteSourceResult(sourceId, ok, message) {
 }
 
 function sourceHidden(sourceId) {
+    if (mirrors.hiddenFor(sourceId)) return true;
     if (!mirrors.settings().hideFailedSources) return false;
     const record = sourceFailures.get(sourceId);
     if (!record) return false;
@@ -124,7 +126,7 @@ function playbackConfig() {
         maxProxyStreams: global.maxProxyStreams,
         sources: Object.fromEntries(adapters.map((adapter) => [adapter.id, mirrors.playbackModeFor(adapter.id)])),
         thumbs: Object.fromEntries(adapters.map((adapter) => {
-            const fromEnv = process.env[`SOURCE_THUMBS_${adapter.id.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`];
+            const fromEnv = process.env[`SOURCE_THUMBS_${mirrors.envId(adapter.id)}`];
             const fromFile = (mirrors.sourceConfig(adapter.id).thumbs) || '';
             return [adapter.id, fromEnv || fromFile || 'auto'];
         })),

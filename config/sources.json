@@ -1,7 +1,9 @@
 {
   "playbackMode": "auto",
   "fullProxyEnabled": true,
-  "maxProxyStreams": 3,
+  "maxProxyStreams": 6,
+  "maxProxyStreamsPerClient": 2,
+  "proxyQueueMs": 8000,
   "hideFailedSources": true,
   "hideAfterFailures": 2,
   "cacheTtlMs": 1800000,
@@ -11,6 +13,7 @@
   "requestTimeoutMs": 60000,
   "sources": {
     "twivideo": {
+      "hidden": true,
       "bases": ["https://twivideo.net"]
     },
     "pornhub": {
@@ -31,6 +34,7 @@
       "bases": ["https://www.tokyomotion.net"]
     },
     "missav": {
+      "hidden": true,
       "bases": [
         "https://missav.ws",
         "https://missav.ai",

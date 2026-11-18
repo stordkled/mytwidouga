@@ -31,9 +31,16 @@ Edit `config/sources.json`, or override it without a code change:
 | `DOMAIN_MEMORY_TTL_MS` | How long the last working domain is preferred. Default 30 minutes. |
 | `MIRROR_TIMEOUT_MS` | Per-domain timeout. Default 12 seconds. |
 | `PLAYBACK_MODE` | `auto` (default), `direct`, `playlist-proxy`, `proxy`, or `embed`. `SOURCE_PLAYBACK_85PO` overrides one source. |
-| `FULL_PROXY` | `0` turns off the full video relay. Default on, capped by `MAX_PROXY_STREAMS` (default 3). |
+| `FULL_PROXY` | `0` turns off the full video relay. Default on, capped by `MAX_PROXY_STREAMS` (code default 3, `config/sources.json` sets 6). |
+| `MAX_PROXY_STREAMS_PER_CLIENT` | Relays one viewer (IP) may hold at once. Default 2, so one phone cannot take every slot. |
+| `PROXY_QUEUE_MS` | How long a relay request waits for a free slot before `429`. Default 8 seconds. |
+| `TRUST_PROXY` | `1` keys the per-viewer cap on `X-Forwarded-For`. Only set this behind your own reverse proxy. |
+| `SOURCE_HIDDEN_MISSAV` | `1`/`0` overrides `"hidden"` for one source. Hidden sources stay in the API but not in the switcher. |
+| `BROWSER_IDLE_MS` | Headless Chrome (if a source uses it) is closed after this long without a page. Default 5 minutes. |
 
-`GET /api/status` includes `domains.<id>.active`, `expiresAt`, `candidates`, and the playback settings.
+`config/sources.json` is re-read when its modification time changes (checked at most every 2 seconds), so edits apply without a restart. `GET /api/status` includes `domains.<id>.active`, `expiresAt`, `candidates`, the playback settings, and `proxy` (`activeStreams`, `waiting`, `clients`).
+
+`twivideo` and `missav` are `"hidden": true` in the shipped config: from this network both answer with a Cloudflare page, so they are not offered and the server does not probe them on every start.
 
 Thumbnails load straight from the CDN with `referrerpolicy=no-referrer`. If that image fails, that source's posters fall back to `/proxy/media`. Set `SOURCE_THUMBS_85PO=proxy` (or `direct`) to skip the probe. A source whose ranking keeps failing is removed from the switcher (`hideFailedSources`, default on, after `hideAfterFailures` failures; a block page counts as a full strike). `HIDE_FAILED_SOURCES=0` keeps every tab.
 
@@ -74,8 +81,11 @@ Rankings are cached per source and period for 30 minutes. Resolved media URLs ar
 
 ## Adding a source
 
-1. Add `sources/<id>.js`. `<id>` must match `[a-z0-9_-]+`.
-2. Register it with one line in `sources/index.js`.
+1. Copy the closest adapter (`sources/tokyomotion.js` is the smallest plain-HTTP one) to `sources/<id>.js`. `<id>` must match `[a-z0-9_-]+`.
+2. Change everything that names the old site: the exported `id`, `name`, and `color`; the source id passed to `withMirror(...)` and any other helper; the constants at the top (`DEFAULT_BASES`, `SELECTORS`, `PERIODS`); `mediaHosts` (every host the video or playlist is served from, including redirect targets) and `mediaReferer`. Then rewrite the ranking URL builder and the HTML parser for the new site's markup. A duplicated `id` stops the server at startup.
+3. Register it with one line in `sources/index.js`.
+4. Add `"<id>": { "bases": [...] }` to `config/sources.json`. Add `"hidden": true` while it is not ready, or if the site only answers with a Cloudflare page.
+5. Add a parser test with a small saved HTML fixture to `test/ranking.test.js`, then `npm test`.
 
 Nothing in `server.js` or the frontend needs to change. Restart `npm start`. The new site appears in the switcher, and its `periods` become the bottom tabs.
 
@@ -137,6 +147,23 @@ Put the CSS selectors and the ranking URLs in constants at the top of the file (
 Use `lib/http.js` `getText` and `lib/mirrors.js` `withMirror`. A block page, timeout, 403, or 5xx throws so the next base is tried. Do not add a Cloudflare solver or copy clearance cookies; put another domain in `bases` instead.
 
 If the site has no period for a tab the user might still request (`3d` is the usual one), do not invent a URL. Omit that period. The registry answers with the nearest period and a `fallbackReason`.
+
+## Server load (about 10 viewers)
+
+What keeps the server light:
+
+- Rankings are cached per source and period for 30 minutes, and concurrent requests for the same board share one fetch. Resolved media URLs are cached for 3 minutes. Both caches are bounded.
+- 85po plays straight from its CDN. Thumbnails load straight from the CDN with no referrer. A proxied thumbnail does not take a relay slot and is sent with `Cache-Control: public, max-age=86400`.
+- A full relay is capped globally (`maxProxyStreams`) and per viewer (`maxProxyStreamsPerClient`). A request over the cap waits up to `proxyQueueMs` for a slot. It does not contact the CDN until it has one.
+- Each MP4 relay answers at most 8MB per Range request. A relay whose viewer hung up, or stopped reading for 30 seconds, closes its CDN connection and frees its slot. The player calls `load()` after removing a `src`, so scrolling away actually ends the download.
+- The service worker never caches Range responses, video, or cross-site thumbnails.
+
+What cannot be reduced, and why:
+
+- **Pornhub video has to be relayed.** HLS segments 404 without the watch-page Referer, which a browser will not send cross-site. Progressive MP4 URLs carry `ip=`/`ipa=` and only play from the IP that resolved them. Every Pornhub viewer therefore uses relay bandwidth. Raise `maxProxyStreams` if the uplink allows it.
+- **TokyoMotion's `/vsrc/` MP4 does not play direct in Chrome** (the ladder ends on the relay), so it is relayed as well.
+- **No shared segment cache.** Friends watching the same video within 3 minutes get the same signed URL, but caching video segments on the server would need either a lot of RAM or a disk cache with eviction. It is not worth it at this size.
+- **The relay limiter is per process.** Running several Node processes multiplies the cap.
 
 ## Tests
 

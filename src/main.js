@@ -156,7 +156,6 @@ function renderSourceBar() {
                 ? saved
                 : source.periods[0].id;
             localStorage.setItem(STORAGE_SOURCE, source.id);
-            resolvedCache.clear();
             renderSourceBar();
             renderPeriodBar();
             loadVideos();
@@ -302,6 +301,21 @@ function cardAt(index) {
     return videoFeed.querySelectorAll('.video-card')[index] || null;
 }
 
+// Removing src alone does not stop the download: the element keeps the old
+// resource (and its /proxy/media connection and relay slot) until load()
+// runs the load algorithm again with no source.
+function releaseMedia(media) {
+    if (!media) return;
+    media.onerror = null;
+    if (!media.paused) media.pause();
+    if (media.hasAttribute('src') || media.currentSrc) {
+        media.removeAttribute('src');
+        try {
+            media.load();
+        } catch { /* nothing to abort */ }
+    }
+}
+
 function stopCard(card) {
     if (!card) return;
     if (card._hls) {
@@ -310,9 +324,7 @@ function stopCard(card) {
     }
     const media = card.querySelector('video');
     if (media) {
-        media.onerror = null;
-        media.pause();
-        media.removeAttribute('src');
+        releaseMedia(media);
         media.style.display = '';
     }
     const frame = card.querySelector('iframe.embed-player');
@@ -366,28 +378,6 @@ function startProgressTracking(media, index) {
     media.addEventListener('timeupdate', update);
 }
 
-function resolvedKey(video) {
-    return `${currentSource.id}:${video.id}`;
-}
-
-function cachedPlayback(video) {
-    const hit = resolvedCache.get(resolvedKey(video));
-    if (!hit) return null;
-    if (hit.expires <= Date.now()) {
-        resolvedCache.delete(resolvedKey(video));
-        return null;
-    }
-    return hit.playback;
-}
-
-function rememberPlayback(video, playback) {
-    resolvedCache.set(resolvedKey(video), { playback, expires: Date.now() + RESOLVE_TTL_MS });
-}
-
-function forgetPlayback(video) {
-    if (video && currentSource) resolvedCache.delete(resolvedKey(video));
-}
-
 async function resolvePlayback(video, fresh) {
     if (video.playback.kind !== 'resolve') return video.playback;
     const response = await fetch(`/api/resolve?source=${encodeURIComponent(currentSource.id)}&id=${encodeURIComponent(video.id)}${fresh ? '&fresh=1' : ''}`);
@@ -400,22 +390,6 @@ async function resolvePlayback(video, fresh) {
     }
     if (data.playback.embedUrl) video.playback.embedUrl = data.playback.embedUrl;
     return data.playback;
-}
-
-function failDirectPlayback(card, index, embedUrl, message) {
-    forgetPlayback(videos[index]);
-    activePlay = -1;
-    const media = card.querySelector('video');
-    if (media) {
-        media.onerror = null;
-        media.removeAttribute('src');
-    }
-    if (embedUrl) {
-        mountEmbed(card, embedUrl);
-        return;
-    }
-    showCardMessage(card, message);
-    showPlayIcon(index, true, true);
 }
 
 function mountEmbed(card, embedUrl) {
@@ -499,8 +473,10 @@ function mountFile(card, index, url) {
     const media = card.querySelector('video');
     media.style.display = '';
     prepareVideo(media);
-    const started = waitUntilPlaying(media);
+    // Assign src first: that resets media.error. Waiting first would see the
+    // error left by the previous ladder step and fail this step at once.
     media.src = url;
+    const started = waitUntilPlaying(media);
     const playPromise = media.play();
     if (playPromise) playPromise.catch(() => {});
     startProgressTracking(media, index);
@@ -578,12 +554,7 @@ function clearMedia(card) {
         card._hls.destroy();
         card._hls = null;
     }
-    const media = card.querySelector('video');
-    if (media) {
-        media.onerror = null;
-        media.pause();
-        media.removeAttribute('src');
-    }
+    releaseMedia(card.querySelector('video'));
 }
 
 async function tryMode(mode, playback, card, index) {
@@ -701,7 +672,9 @@ function preloadNext(index) {
             if (embedUrl && !card.querySelector('iframe.embed-player')) mountEmbed(card, embedUrl);
             return;
         }
-        if (!playback || !playback.url || mode === 'proxy') return;
+        // An IP-bound or Referer-checked URL only plays through the relay;
+        // a direct preload would just fail against the CDN.
+        if (!playback || !playback.url || mode === 'proxy' || playbackNeedsProxy(playback)) return;
         const media = card.querySelector('video');
         if (!media || media.getAttribute('src')) return;
         prepareVideo(media);
@@ -712,7 +685,12 @@ function preloadNext(index) {
     });
 }
 
+let feedObserver = null;
+
 function setupObserver() {
+    // One observer per feed. A new one per render kept the old cards (and
+    // their <video> elements) reachable after a source or period switch.
+    if (feedObserver) feedObserver.disconnect();
     const observer = new IntersectionObserver((entries) => {
         entries.forEach((entry) => {
             const index = Number(entry.target.dataset.index);
@@ -723,6 +701,7 @@ function setupObserver() {
             }
         });
     }, { threshold: [0.6], root: videoFeed });
+    feedObserver = observer;
     videoFeed.querySelectorAll('.video-card').forEach((card) => observer.observe(card));
 }
 
@@ -972,7 +951,10 @@ async function init() {
         playbackConfig = data.playback || playbackConfig;
         if (sources.length === 0) throw new Error('ソースがありません');
         const saved = localStorage.getItem(STORAGE_SOURCE);
-        currentSource = sources.find((source) => source.id === saved) || sources[0];
+        // A source hidden in config/sources.json is not offered, even if it
+        // was the last one this browser used.
+        const offered = visibleSources();
+        currentSource = offered.find((source) => source.id === saved) || offered[0];
         const savedPeriod = localStorage.getItem(STORAGE_PERIOD + currentSource.id);
         currentPeriod = currentSource.periods.some((period) => period.id === savedPeriod)
             ? savedPeriod

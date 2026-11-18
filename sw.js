@@ -1,4 +1,4 @@
-const CACHE_NAME = 'twivideo-shorts-v7';
+const CACHE_NAME = 'twivideo-shorts-v8';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
@@ -21,9 +21,9 @@ function appShell(url) {
 async function networkFirst(request) {
     try {
         const response = await fetch(request);
-        if (response && response.ok && request.method === 'GET') {
-            const cache = await caches.open(CACHE_NAME);
-            cache.put(request, response.clone());
+        if (response && response.status === 200 && request.method === 'GET') {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy)).catch(() => {});
         }
         return response;
     } catch (err) {
@@ -61,36 +61,63 @@ self.addEventListener('activate', (event) => {
     })());
 });
 
-// Fetch: the app shell is network-first so a new main.js is not pinned by
-// the previous cache. API and media relays are network-only. Everything else
-// (fonts, icons) stays cache-first.
-self.addEventListener('fetch', (event) => {
-    const url = new URL(event.request.url);
+// Third-party static assets that are worth keeping offline.
+const CACHEABLE_HOSTS = new Set([
+    'fonts.googleapis.com',
+    'fonts.gstatic.com',
+    'cdnjs.cloudflare.com',
+    'cdn.jsdelivr.net',
+]);
 
-    if (event.request.headers.get('service-worker')) {
-        event.respondWith(fetch(event.request));
+function cacheFirstAllowed(url) {
+    if (url.origin === self.location.origin) return url.pathname.startsWith('/icons/');
+    return CACHEABLE_HOSTS.has(url.hostname);
+}
+
+// Fetch: the app shell is network-first so a new main.js is not pinned by
+// the previous cache. API and media relays are network-only. Fonts, icons
+// and the CDN scripts are cache-first. Anything else is left to the browser.
+self.addEventListener('fetch', (event) => {
+    const request = event.request;
+    if (request.method !== 'GET') return;
+    const url = new URL(request.url);
+
+    if (request.headers.get('service-worker')) {
+        event.respondWith(fetch(request));
         return;
     }
 
     // Leave API and media relays to the browser. Piping a <video> Range
     // request through the worker makes Chrome re-download the rest of a
     // progressive file on every reconnect, which locks the renderer.
-    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/proxy/')) {
+    if (url.origin === self.location.origin
+        && (url.pathname.startsWith('/api/') || url.pathname.startsWith('/proxy/'))) {
+        return;
+    }
+
+    // Direct CDN video (85po plays straight from its CDN) and ranking
+    // thumbnails: a 206 cannot be stored, and caching every poster of every
+    // ranking would grow the cache without limit.
+    if (request.headers.has('range') || request.destination === 'video' || request.destination === 'audio') {
         return;
     }
 
     if (appShell(url)) {
-        event.respondWith(networkFirst(event.request));
+        event.respondWith(networkFirst(request));
         return;
     }
 
+    if (!cacheFirstAllowed(url)) return;
+
     event.respondWith(
-        caches.match(event.request).then((cached) => {
+        caches.match(request).then((cached) => {
             if (cached) return cached;
-            return fetch(event.request).then((response) => {
-                if (response.ok) {
+            return fetch(request).then((response) => {
+                if (response.ok && response.status === 200) {
                     const clone = response.clone();
-                    caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+                    caches.open(CACHE_NAME)
+                        .then((cache) => cache.put(request, clone))
+                        .catch(() => {});
                 }
                 return response;
             });

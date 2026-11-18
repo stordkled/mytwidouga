@@ -5,6 +5,7 @@ const sources = require('./sources');
 const { proxyMedia, proxyStatus } = require('./lib/proxy');
 const mirrors = require('./lib/mirrors');
 const { closeBrowser, status: browserStatus } = require('./lib/browser');
+const { staticPath } = require('./lib/static');
 
 const PORT = process.env.PORT || 3000;
 
@@ -32,11 +33,10 @@ function sendJson(res, status, body) {
 }
 
 function serveStatic(req, res) {
-    const filePath = req.url === '/' ? '/index.html' : req.url.split('?')[0];
-    const absPath = path.join(__dirname, filePath);
-    if (!absPath.startsWith(__dirname)) {
-        res.writeHead(403);
-        res.end('Forbidden');
+    const absPath = staticPath(req.url, __dirname);
+    if (!absPath) {
+        res.writeHead(404);
+        res.end('Not Found');
         return;
     }
     const ext = path.extname(absPath);
@@ -54,9 +54,29 @@ function serveStatic(req, res) {
     });
 }
 
-const server = http.createServer(async (req, res) => {
+// A rejected promise from this handler would be an unhandled rejection and
+// take the whole server down for every viewer, so it is caught here.
+const server = http.createServer((req, res) => {
+    handle(req, res).catch((err) => {
+        console.error('[Server]', req.method, req.url && req.url.slice(0, 120), err && err.message);
+        if (!res.headersSent) {
+            sendJson(res, 500, { ok: false, error: 'Internal error' });
+        } else if (!res.destroyed) {
+            res.destroy();
+        }
+    });
+});
+
+async function handle(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    const url = new URL(req.url, `http://localhost:${PORT}`);
+    let url;
+    try {
+        url = new URL(req.url, `http://localhost:${PORT}`);
+    } catch {
+        res.writeHead(400);
+        res.end('Bad Request');
+        return;
+    }
 
     if (url.pathname === '/api/status') {
         sendJson(res, 200, {
@@ -137,12 +157,12 @@ const server = http.createServer(async (req, res) => {
         const forwarded = req.headers['x-forwarded-proto'];
         const proto = forwarded ? String(forwarded).split(',')[0].trim() : 'http';
         const origin = req.headers.host ? `${proto}://${req.headers.host}` : '';
-        await proxyMedia(targetUrl, source, req, res, undefined, undefined, { playlistOnly, origin });
+        await proxyMedia(targetUrl, source, req, res, { playlistOnly, origin });
         return;
     }
 
     serveStatic(req, res);
-});
+}
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n  TWIVIDEO Shorts`);
@@ -151,9 +171,15 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log('  Browser launches on demand.\n');
 });
 
+let shuttingDown = false;
+
 async function shutdown() {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log('\n[Shutdown] Closing browser...');
     server.close();
+    // Open relays would otherwise keep close() waiting.
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
     await closeBrowser();
     process.exit(0);
 }
