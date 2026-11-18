@@ -35,6 +35,8 @@
 
     --safe-bottom: env(safe-area-inset-bottom, 0px);
     --nav-height: 64px;
+    --source-bar-height: 52px;
+    --note-height: 0px;
 }
 
 /* ============================================
@@ -78,8 +80,11 @@ body {
    ============================================ */
 .loading-screen {
     position: fixed;
-    inset: 0;
-    z-index: 1000;
+    top: var(--source-bar-height);
+    right: 0;
+    bottom: calc(var(--nav-height) + var(--safe-bottom));
+    left: 0;
+    z-index: 40;
     background: var(--bg-primary);
     display: flex;
     flex-direction: column;
@@ -188,11 +193,14 @@ body {
     background: #000;
 }
 
-.video-wrapper video {
+.video-wrapper video,
+.video-wrapper iframe {
     width: 100%;
     height: 100%;
     object-fit: contain;
     display: block;
+    border: 0;
+    background: #000;
 }
 
 /* Thumbnail / Poster overlay */
@@ -283,7 +291,7 @@ body {
    ============================================ */
 .ranking-badge {
     position: absolute;
-    top: 16px;
+    top: calc(var(--source-bar-height) + var(--note-height) + 12px);
     left: 16px;
     z-index: 10;
     display: flex;
@@ -431,6 +439,12 @@ body {
     color: #1da1f2;
     font-weight: 600;
     margin-bottom: 8px;
+}
+
+.video-info .info-meta {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
 }
 
 .video-info .info-title {
@@ -675,10 +689,15 @@ body {
         margin: 0 auto;
     }
 
-    .bottom-nav {
+    .bottom-nav,
+    .source-bar,
+    .period-note {
         max-width: 420px;
         left: 50%;
         transform: translateX(-50%);
+    }
+
+    .bottom-nav {
         border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     }
 
@@ -690,8 +709,88 @@ body {
 }
 
 /* ============================================
-   Transition helpers
+   Source switcher
    ============================================ */
+.source-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--source-bar-height);
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    overflow-x: auto;
+    background: rgba(0, 0, 0, 0.78);
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    scrollbar-width: none;
+}
+
+.source-bar::-webkit-scrollbar {
+    display: none;
+}
+
+.source-btn {
+    flex: 0 0 auto;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: var(--radius-full);
+    padding: 6px 12px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.source-btn.active {
+    color: #fff;
+    border-color: transparent;
+    background: var(--accent-gradient);
+}
+
+.period-note {
+    position: fixed;
+    top: var(--source-bar-height);
+    left: 0;
+    right: 0;
+    z-index: 55;
+    padding: 6px 14px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: rgba(12, 12, 12, 0.92);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+body.has-note {
+    --note-height: 31px;
+}
+
+.period-note.hidden {
+    display: none;
+}
+
+.card-message {
+    position: absolute;
+    left: 16px;
+    right: 88px;
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 88px);
+    z-index: 12;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    background: rgba(0, 0, 0, 0.72);
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
 .fade-in {
     animation: fadeIn 0.5s ease forwards;
 }
@@ -705,5 +804,18 @@ body {
     to {
         opacity: 1;
         transform: translateY(0);
+    }
+}
+
+/* Source bar rules are declared after the first desktop query, so center them here. */
+@media (min-width: 768px) {
+    .source-bar,
+    .period-note {
+        left: 0;
+        right: 0;
+        width: min(420px, 100%);
+        margin-left: auto;
+        margin-right: auto;
+        transform: none;
     }
 }

@@ -1,486 +1,613 @@
 /* ============================================
-   TWIVIDEO Shorts - Main Application
+   Shorts ranking feed
    ============================================ */
 
-// ---- State ----
+const videoFeed = document.getElementById('videoFeed');
+const loadingScreen = document.getElementById('loadingScreen');
+const loadingText = document.getElementById('loadingText');
+const bottomNav = document.getElementById('bottomNav');
+const sourceBar = document.getElementById('sourceBar');
+const periodNote = document.getElementById('periodNote');
+
+const STORAGE_SOURCE = 'shorts.source';
+const STORAGE_PERIOD = 'shorts.period.';
+
+let sources = [];
+let currentSource = null;
+let currentPeriod = '';
 let videos = [];
-let currentSort = '24';
 let isMuted = true;
 let currentVideoIndex = 0;
 let isLoading = false;
 let lastTapTime = 0;
+let loadController = null;
+let playToken = 0;
+let activePlay = -1;
+const resolvedCache = new Map();
 
-const videoFeed = document.getElementById('videoFeed');
-const loadingScreen = document.getElementById('loadingScreen');
-const bottomNav = document.getElementById('bottomNav');
-
-// ---- Helper: proxy URL through our server ----
-function proxyUrl(url) {
-    return '/proxy/media?url=' + encodeURIComponent(url);
+function mediaProxy(sourceId, url) {
+    if (!url) return '';
+    return `/proxy/media?source=${encodeURIComponent(sourceId)}&url=${encodeURIComponent(url)}`;
 }
 
-// ---- Parse HTML Response ----
-function parseVideoList(html) {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(`<div>${html}</div>`, 'text/html');
-    const items = doc.querySelectorAll('.art_li');
-    const result = [];
+function safeColor(color) {
+    return /^#[0-9a-fA-F]{6}$/.test(color || '') ? color : '#ffffff';
+}
 
-    items.forEach((item, index) => {
-        const link = item.querySelector('a.item_link');
-        const img = item.querySelector('img');
-        const rankEl = item.querySelector('.item_ranking');
+function periodIcon(id) {
+    if (id === '24h') return 'fa-fire';
+    if (id === '7d') return 'fa-chart-line';
+    if (id === '30d') return 'fa-trophy';
+    return 'fa-clock';
+}
 
-        if (link && img) {
-            const videoUrl = link.getAttribute('href');
-            const thumbUrl = img.getAttribute('src');
-            const rank = rankEl ? rankEl.textContent.trim() : `No.${index + 1}`;
-            const dataId = link.getAttribute('data-id') || '';
+function rankClass(rank) {
+    if (rank === 1) return 'rank-1';
+    if (rank === 2) return 'rank-2';
+    if (rank === 3) return 'rank-3';
+    return '';
+}
 
-            result.push({
-                id: dataId,
-                videoUrl: proxyUrl(videoUrl),
-                thumbUrl: proxyUrl(thumbUrl),
-                originalVideoUrl: videoUrl,
-                rank,
-                rankNum: index + 1,
-            });
-        }
+function rankIcon(rank) {
+    if (rank === 1) return 'fa-crown';
+    if (rank <= 3) return 'fa-medal';
+    return 'fa-hashtag';
+}
+
+function setLoading(visible, message) {
+    loadingText.textContent = message || '動画を読み込み中...';
+    loadingScreen.classList.toggle('hidden', !visible);
+}
+
+function setFallbackNote(text) {
+    if (text) {
+        periodNote.textContent = text;
+        periodNote.classList.remove('hidden');
+        document.body.classList.add('has-note');
+    } else {
+        periodNote.textContent = '';
+        periodNote.classList.add('hidden');
+        document.body.classList.remove('has-note');
+    }
+}
+
+function renderSourceBar() {
+    sourceBar.replaceChildren();
+    sources.forEach((source) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'source-btn' + (source.id === currentSource.id ? ' active' : '');
+        button.textContent = source.name;
+        button.style.borderColor = source.id === currentSource.id ? 'transparent' : safeColor(source.color);
+        button.setAttribute('aria-pressed', source.id === currentSource.id ? 'true' : 'false');
+        button.addEventListener('click', () => {
+            if (source.id === currentSource.id) return;
+            currentSource = source;
+            const saved = localStorage.getItem(STORAGE_PERIOD + source.id);
+            currentPeriod = source.periods.some((period) => period.id === saved)
+                ? saved
+                : source.periods[0].id;
+            localStorage.setItem(STORAGE_SOURCE, source.id);
+            resolvedCache.clear();
+            renderSourceBar();
+            renderPeriodBar();
+            loadVideos();
+        });
+        sourceBar.appendChild(button);
     });
-
-    return result;
 }
 
-// ---- Fetch Videos from API ----
-async function fetchVideos(sort = '24', offset = 0, limit = 30) {
-    const params = new URLSearchParams({ sort, offset, limit });
-    const response = await fetch(`/api/videos?${params}`);
-
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const html = await response.text();
-    return parseVideoList(html);
+function renderPeriodBar() {
+    bottomNav.replaceChildren();
+    currentSource.periods.forEach((period) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'nav-btn' + (period.id === currentPeriod ? ' active' : '');
+        button.innerHTML = `<i class="fas ${periodIcon(period.id)}"></i><span></span>`;
+        button.querySelector('span').textContent = period.label;
+        button.addEventListener('click', () => {
+            if (period.id === currentPeriod) return;
+            currentPeriod = period.id;
+            localStorage.setItem(STORAGE_PERIOD + currentSource.id, period.id);
+            renderPeriodBar();
+            loadVideos();
+        });
+        bottomNav.appendChild(button);
+    });
 }
 
-// ---- Create Video Card ----
+function showMessage(title, message, onRetry) {
+    videoFeed.replaceChildren();
+    const wrap = document.createElement('div');
+    wrap.className = 'error-state';
+    const icon = document.createElement('i');
+    icon.className = 'fas fa-exclamation-triangle';
+    const heading = document.createElement('h3');
+    heading.textContent = title;
+    const paragraph = document.createElement('p');
+    paragraph.textContent = message;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = '再読み込み';
+    button.addEventListener('click', onRetry);
+    wrap.append(icon, heading, paragraph, button);
+    videoFeed.appendChild(wrap);
+}
+
 function createVideoCard(video, index) {
     const card = document.createElement('div');
     card.className = 'video-card';
-    card.dataset.index = index;
-    card.dataset.id = video.id;
+    card.dataset.index = String(index);
 
-    // Determine rank class
-    let rankClass = '';
-    if (video.rankNum === 1) rankClass = 'rank-1';
-    else if (video.rankNum === 2) rankClass = 'rank-2';
-    else if (video.rankNum === 3) rankClass = 'rank-3';
-
-    // Rank icon
-    let rankIcon = '<i class="fas fa-medal rank-icon"></i>';
-    if (video.rankNum === 1) rankIcon = '<i class="fas fa-crown rank-icon"></i>';
-    else if (video.rankNum <= 3) rankIcon = '<i class="fas fa-medal rank-icon"></i>';
-    else rankIcon = '<i class="fas fa-hashtag rank-icon"></i>';
+    const poster = video.thumbUrl ? mediaProxy(currentSource.id, video.thumbUrl) : '';
+    const chipColor = safeColor(currentSource.color);
 
     card.innerHTML = `
     <div class="video-wrapper">
-      <video
-        src="${video.videoUrl}"
-        poster="${video.thumbUrl}"
-        loop
-        muted
-        playsinline
-        preload="auto"
-      ></video>
+      <video loop muted playsinline preload="none" ${poster ? `poster="${poster.replace(/"/g, '')}"` : ''}></video>
     </div>
-
     <div class="gradient-top"></div>
     <div class="gradient-bottom"></div>
-
-    <div class="ranking-badge ${rankClass}">
-      ${rankIcon}
-      <span>${video.rank}</span>
+    <div class="ranking-badge ${rankClass(video.rank)}">
+      <i class="fas ${rankIcon(video.rank)} rank-icon"></i>
+      <span></span>
     </div>
-
     <div class="play-pause-overlay" data-index="${index}">
-      <div class="play-icon" id="playIcon-${index}">
-        <i class="fas fa-play"></i>
-      </div>
+      <div class="play-icon" id="playIcon-${index}"><i class="fas fa-play"></i></div>
     </div>
-
     <div class="side-actions">
-      <button class="action-btn like-btn" data-id="${video.id}">
+      <button class="action-btn like-btn" type="button">
         <div class="btn-icon"><i class="fas fa-heart"></i></div>
         <span class="btn-label">いいね</span>
       </button>
-      <button class="action-btn sound-btn ${isMuted ? 'muted' : ''}">
+      <button class="action-btn sound-btn ${isMuted ? 'muted' : ''}" type="button">
         <div class="btn-icon"><i class="fas ${isMuted ? 'fa-volume-xmark' : 'fa-volume-high'}"></i></div>
         <span class="btn-label">${isMuted ? 'ミュート' : '音あり'}</span>
       </button>
-      <button class="action-btn share-btn" data-url="${video.originalVideoUrl}">
+      <button class="action-btn share-btn" type="button">
         <div class="btn-icon"><i class="fas fa-share"></i></div>
         <span class="btn-label">共有</span>
       </button>
-      <button class="action-btn twitter-btn" data-id="${video.id}">
-        <div class="btn-icon"><i class="fa-brands fa-x-twitter"></i></div>
-        <span class="btn-label">元ポスト</span>
+      <button class="action-btn origin-btn" type="button">
+        <div class="btn-icon"><i class="fas fa-arrow-up-right-from-square"></i></div>
+        <span class="btn-label">${video.lookup ? '元ポスト' : '元ページ'}</span>
       </button>
     </div>
-
     <div class="video-info">
-      <div class="info-source">
-        <i class="fa-brands fa-x-twitter"></i>
-        Twitter/X 動画
-      </div>
-      <div class="info-title">ランキング ${video.rank} の動画</div>
+      <div class="info-source"><span></span></div>
+      <div class="info-title"></div>
+      <div class="info-meta"></div>
     </div>
+    <div class="video-progress"><div class="progress-fill" id="progress-${index}"></div></div>
+    `;
 
-    <div class="video-progress">
-      <div class="progress-fill" id="progress-${index}"></div>
-    </div>
+    card.querySelector('.ranking-badge span').textContent = video.rankLabel || `No.${video.rank}`;
+    const sourceChip = card.querySelector('.info-source');
+    sourceChip.querySelector('span').textContent = currentSource.name;
+    sourceChip.style.color = chipColor;
+    sourceChip.style.borderColor = chipColor;
+    sourceChip.style.background = 'rgba(255,255,255,0.06)';
+    card.querySelector('.info-title').textContent = video.title || `ランキング ${video.rankLabel || video.rank}`;
+    const meta = [video.duration, video.views].filter(Boolean).join(' · ');
+    card.querySelector('.info-meta').textContent = meta;
 
-    ${index === 0 ? `
-    <div class="scroll-indicator" id="scrollIndicator">
-      <i class="fas fa-chevron-down"></i>
-      <span>スワイプして次へ</span>
-    </div>
-    ` : ''}
-  `;
-
+    if (index === 0) {
+        const hint = document.createElement('div');
+        hint.className = 'scroll-indicator';
+        hint.id = 'scrollIndicator';
+        hint.innerHTML = '<i class="fas fa-chevron-down"></i><span>スワイプして次へ</span>';
+        card.appendChild(hint);
+    }
     return card;
 }
 
-// ---- Render Videos ----
-function renderVideos(videoList) {
-    videoFeed.innerHTML = '';
-    videoList.forEach((video, index) => {
-        const card = createVideoCard(video, index);
-        videoFeed.appendChild(card);
-    });
+function renderVideos(list) {
+    stopAll();
+    videoFeed.replaceChildren();
+    list.forEach((video, index) => videoFeed.appendChild(createVideoCard(video, index)));
     setupObserver();
     setupEventListeners();
 }
 
-// ---- Intersection Observer for Auto-play ----
-function setupObserver() {
-    const observer = new IntersectionObserver(
-        (entries) => {
-            entries.forEach((entry) => {
-                const video = entry.target.querySelector('video');
-                const index = parseInt(entry.target.dataset.index);
-
-                if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
-                    currentVideoIndex = index;
-                    playVideo(video, index);
-
-                    // Hide scroll indicator after first scroll
-                    const indicator = document.getElementById('scrollIndicator');
-                    if (indicator && index > 0) {
-                        indicator.classList.add('hidden');
-                    }
-                } else {
-                    pauseVideo(video, index);
-                }
-            });
-        },
-        {
-            threshold: [0.5],
-            root: videoFeed,
-        }
-    );
-
-    document.querySelectorAll('.video-card').forEach((card) => {
-        observer.observe(card);
-    });
+function cardAt(index) {
+    return videoFeed.querySelectorAll('.video-card')[index] || null;
 }
 
-// ---- Play / Pause ----
-function playVideo(video, index) {
-    if (!video) return;
-    video.muted = isMuted;
-
-    // Add error handler for debugging
-    video.onerror = function () {
-        console.error('Video error:', video.error, video.src);
-    };
-
-    const playPromise = video.play();
-    if (playPromise !== undefined) {
-        playPromise.then(() => {
-            console.log('Playing video #' + index);
-        }).catch((err) => {
-            console.warn('Auto-play blocked for #' + index + ':', err.message);
-            // Show a persistent play icon so user knows to tap
-            showPlayIcon(index, true, true);
-        });
-    }
-
-    // Start progress tracking
-    startProgressTracking(video, index);
-}
-
-function pauseVideo(video, index) {
-    if (!video) return;
-    video.pause();
-}
-
-function togglePlayPause(index) {
-    const card = document.querySelectorAll('.video-card')[index];
+function stopCard(card) {
     if (!card) return;
-    const video = card.querySelector('video');
-    if (!video) return;
-
-    if (video.paused) {
-        video.muted = isMuted;
-        video.play().then(() => {
-            showPlayIcon(index, false, false);
-        }).catch((err) => {
-            console.warn('Play failed:', err.message);
-        });
-    } else {
-        video.pause();
-        showPlayIcon(index, true, false);
+    if (card._hls) {
+        card._hls.destroy();
+        card._hls = null;
     }
+    const media = card.querySelector('video');
+    if (media) {
+        media.pause();
+        media.removeAttribute('src');
+        media.style.display = '';
+        media.load();
+    }
+    const frame = card.querySelector('iframe.embed-player');
+    if (frame) frame.remove();
+    const overlay = card.querySelector('.play-pause-overlay');
+    if (overlay) overlay.style.display = '';
+    const progress = card.querySelector('.video-progress');
+    if (progress) progress.style.display = '';
+}
+
+function stopAll() {
+    playToken += 1;
+    activePlay = -1;
+    videoFeed.querySelectorAll('.video-card').forEach(stopCard);
 }
 
 function showPlayIcon(index, isPaused, persistent) {
     const icon = document.getElementById(`playIcon-${index}`);
     if (!icon) return;
-
-    const i = icon.querySelector('i');
-    // Show play icon when paused (user needs to click to play)
-    // Show pause icon briefly when playing (feedback that it's now playing)
-    i.className = isPaused ? 'fas fa-play' : 'fas fa-pause';
-
+    icon.querySelector('i').className = isPaused ? 'fas fa-play' : 'fas fa-pause';
     icon.classList.add('visible');
     if (!persistent) {
-        setTimeout(() => {
-            icon.classList.remove('visible');
-        }, 600);
+        setTimeout(() => icon.classList.remove('visible'), 600);
     }
 }
 
-// ---- Progress Bar ----
-function startProgressTracking(video, index) {
+function showCardMessage(card, text) {
+    let note = card.querySelector('.card-message');
+    if (!note) {
+        note = document.createElement('div');
+        note.className = 'card-message';
+        card.appendChild(note);
+    }
+    note.textContent = text;
+}
+
+function startProgressTracking(media, index) {
     const progressFill = document.getElementById(`progress-${index}`);
     if (!progressFill) return;
-
-    function update() {
-        if (video.duration) {
-            const pct = (video.currentTime / video.duration) * 100;
-            progressFill.style.width = pct + '%';
-        }
-        if (!video.paused) {
-            requestAnimationFrame(update);
-        }
-    }
+    const update = () => {
+        if (media.duration) progressFill.style.width = ((media.currentTime / media.duration) * 100) + '%';
+        if (!media.paused) requestAnimationFrame(update);
+    };
     requestAnimationFrame(update);
 }
 
-// ---- Event Listeners ----
-function setupEventListeners() {
-    // Play/Pause on tap - immediate response, no delay
-    document.querySelectorAll('.play-pause-overlay').forEach((overlay) => {
-        overlay.addEventListener('click', (e) => {
-            const now = Date.now();
-            const index = parseInt(overlay.dataset.index);
+async function resolvePlayback(video) {
+    const key = `${currentSource.id}:${video.id}`;
+    if (resolvedCache.has(key)) return resolvedCache.get(key);
+    const response = await fetch(`/api/resolve?source=${encodeURIComponent(currentSource.id)}&id=${encodeURIComponent(video.id)}`);
+    const data = await response.json();
+    if (!data.ok || !data.playback) {
+        if (video.playback.embedUrl) {
+            return { kind: 'embed', url: video.playback.embedUrl, embedUrl: video.playback.embedUrl };
+        }
+        throw new Error(data.error || '再生情報を取得できませんでした');
+    }
+    resolvedCache.set(key, data.playback);
+    return data.playback;
+}
 
-            // Double-tap → like (within 400ms)
+function mountEmbed(card, embedUrl) {
+    const wrapper = card.querySelector('.video-wrapper');
+    const media = wrapper.querySelector('video');
+    if (media) media.style.display = 'none';
+    let frame = wrapper.querySelector('iframe.embed-player');
+    if (!frame) {
+        frame = document.createElement('iframe');
+        frame.className = 'embed-player';
+        frame.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture');
+        frame.setAttribute('allowfullscreen', '');
+        frame.setAttribute('referrerpolicy', 'no-referrer-when-downgrade');
+        wrapper.appendChild(frame);
+    }
+    if (frame.src !== embedUrl) frame.src = embedUrl;
+    const overlay = card.querySelector('.play-pause-overlay');
+    if (overlay) overlay.style.display = 'none';
+    const progress = card.querySelector('.video-progress');
+    if (progress) progress.style.display = 'none';
+}
+
+function mountFile(card, index, url) {
+    const media = card.querySelector('video');
+    media.style.display = '';
+    media.src = url;
+    media.muted = isMuted;
+    const playPromise = media.play();
+    if (playPromise) {
+        playPromise.then(() => showPlayIcon(index, false, false)).catch(() => showPlayIcon(index, true, true));
+    }
+    startProgressTracking(media, index);
+    media.onerror = () => {
+        const embedUrl = videos[index] && videos[index].playback.embedUrl;
+        if (embedUrl) {
+            showCardMessage(card, '直接再生できないため、埋め込みプレイヤーに切り替えます');
+            mountEmbed(card, embedUrl);
+        } else {
+            showCardMessage(card, 'この動画を再生できませんでした');
+        }
+    };
+}
+
+function mountHls(card, index, url) {
+    const media = card.querySelector('video');
+    media.style.display = '';
+    const embedUrl = videos[index] && videos[index].playback.embedUrl;
+    const fail = () => {
+        if (card._hls) {
+            card._hls.destroy();
+            card._hls = null;
+        }
+        if (embedUrl) {
+            showCardMessage(card, 'HLSを再生できないため、埋め込みプレイヤーに切り替えます');
+            mountEmbed(card, embedUrl);
+        } else {
+            showCardMessage(card, 'この動画を再生できませんでした');
+        }
+    };
+
+    if (media.canPlayType('application/vnd.apple.mpegurl')) {
+        mountFile(card, index, url);
+        return;
+    }
+    if (!window.Hls || !window.Hls.isSupported()) {
+        fail();
+        return;
+    }
+    const hls = new window.Hls({ enableWorker: true });
+    card._hls = hls;
+    hls.loadSource(url);
+    hls.attachMedia(media);
+    hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+        media.muted = isMuted;
+        media.play().then(() => showPlayIcon(index, false, false)).catch(() => showPlayIcon(index, true, true));
+        startProgressTracking(media, index);
+    });
+    hls.on(window.Hls.Events.ERROR, (_, data) => {
+        if (data && data.fatal) fail();
+    });
+}
+
+async function playCard(index) {
+    const card = cardAt(index);
+    const video = videos[index];
+    if (!card || !video) return;
+    if (activePlay === index) return;
+    activePlay = index;
+    const token = ++playToken;
+    currentVideoIndex = index;
+    videoFeed.querySelectorAll('.video-card').forEach((other, otherIndex) => {
+        if (otherIndex !== index) stopCard(other);
+    });
+    let playback = video.playback;
+    try {
+        if (playback.kind === 'resolve') playback = await resolvePlayback(video);
+    } catch (err) {
+        if (token !== playToken) return;
+        activePlay = -1;
+        if (video.playback.embedUrl) {
+            mountEmbed(card, video.playback.embedUrl);
+            return;
+        }
+        showCardMessage(card, err.message || '再生情報を取得できませんでした');
+        showPlayIcon(index, true, true);
+        return;
+    }
+    if (token !== playToken || currentVideoIndex !== index) return;
+
+    const kind = playback.kind === 'hls' || (playback.url && /\.m3u8(\?|$)/i.test(playback.url))
+        ? 'hls'
+        : playback.kind;
+    if (kind === 'embed' || (!playback.url && playback.embedUrl)) {
+        mountEmbed(card, playback.embedUrl || playback.url);
+        return;
+    }
+    const proxied = mediaProxy(currentSource.id, playback.url);
+    if (kind === 'hls') mountHls(card, index, proxied);
+    else mountFile(card, index, proxied);
+
+    const indicator = document.getElementById('scrollIndicator');
+    if (indicator && index > 0) indicator.classList.add('hidden');
+}
+
+function setupObserver() {
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+            const index = Number(entry.target.dataset.index);
+            if (entry.isIntersecting && entry.intersectionRatio >= 0.6) {
+                playCard(index);
+            } else if (index !== currentVideoIndex) {
+                stopCard(entry.target);
+            }
+        });
+    }, { threshold: [0.6], root: videoFeed });
+    videoFeed.querySelectorAll('.video-card').forEach((card) => observer.observe(card));
+}
+
+function togglePlayPause(index) {
+    const card = cardAt(index);
+    if (!card || card.querySelector('iframe.embed-player')) return;
+    const media = card.querySelector('video');
+    if (!media || !media.src) {
+        playCard(index);
+        return;
+    }
+    if (media.paused) {
+        media.muted = isMuted;
+        media.play().then(() => showPlayIcon(index, false, false)).catch(() => {});
+    } else {
+        media.pause();
+        showPlayIcon(index, true, false);
+    }
+}
+
+function updateAllMuteState() {
+    videoFeed.querySelectorAll('video').forEach((media) => {
+        media.muted = isMuted;
+    });
+    videoFeed.querySelectorAll('.sound-btn').forEach((button) => {
+        const icon = button.querySelector('.btn-icon i');
+        const label = button.querySelector('.btn-label');
+        button.classList.toggle('muted', isMuted);
+        icon.className = isMuted ? 'fas fa-volume-xmark' : 'fas fa-volume-high';
+        label.textContent = isMuted ? 'ミュート' : '音あり';
+    });
+}
+
+function setupEventListeners() {
+    videoFeed.querySelectorAll('.play-pause-overlay').forEach((overlay) => {
+        overlay.addEventListener('click', (event) => {
+            const now = Date.now();
+            const index = Number(overlay.dataset.index);
             if (now - lastTapTime < 400) {
-                handleDoubleTap(e, index);
                 lastTapTime = 0;
+                const card = cardAt(index);
+                if (!card) return;
+                const heart = document.createElement('div');
+                heart.className = 'double-tap-heart';
+                heart.innerHTML = '<i class="fas fa-heart"></i>';
+                const rect = card.getBoundingClientRect();
+                heart.style.left = (event.clientX - rect.left - 40) + 'px';
+                heart.style.top = (event.clientY - rect.top - 40) + 'px';
+                card.appendChild(heart);
+                setTimeout(() => heart.remove(), 900);
+                const like = card.querySelector('.like-btn');
+                if (like) like.classList.add('liked');
                 return;
             }
-
             lastTapTime = now;
-
-            // Single tap → play/pause immediately
             togglePlayPause(index);
         });
     });
 
-    // Like button
-    document.querySelectorAll('.like-btn').forEach((btn) => {
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            btn.classList.toggle('liked');
+    videoFeed.querySelectorAll('.like-btn').forEach((button) => {
+        button.addEventListener('click', (event) => {
+            event.stopPropagation();
+            button.classList.toggle('liked');
         });
     });
 
-    // Sound button
-    document.querySelectorAll('.sound-btn').forEach((btn) => {
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
+    videoFeed.querySelectorAll('.sound-btn').forEach((button) => {
+        button.addEventListener('click', (event) => {
+            event.stopPropagation();
             isMuted = !isMuted;
             updateAllMuteState();
         });
     });
 
-    // Share button
-    document.querySelectorAll('.share-btn').forEach((btn) => {
-        btn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            const url = btn.dataset.url;
+    videoFeed.querySelectorAll('.share-btn').forEach((button, index) => {
+        button.addEventListener('click', async (event) => {
+            event.stopPropagation();
+            const video = videos[index];
+            const url = (video && (video.externalUrl || video.pageUrl)) || location.href;
             if (navigator.share) {
-                try {
-                    await navigator.share({ title: 'TWIVIDEO Shorts', url });
-                } catch { }
+                try { await navigator.share({ title: currentSource.name, url }); } catch { /* dismissed */ }
             } else {
                 await navigator.clipboard.writeText(url);
-                btn.querySelector('.btn-label').textContent = 'コピー済';
-                setTimeout(() => {
-                    btn.querySelector('.btn-label').textContent = '共有';
-                }, 1500);
+                const label = button.querySelector('.btn-label');
+                label.textContent = 'コピー済';
+                setTimeout(() => { label.textContent = '共有'; }, 1500);
             }
         });
     });
 
-    // Twitter link button
-    document.querySelectorAll('.twitter-btn').forEach((btn) => {
-        btn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            const dataId = btn.dataset.id;
-            try {
-                const resp = await fetch(`https://twivideo.net/api/link.php?id=${encodeURIComponent(dataId)}`);
-                if (resp.ok) {
-                    const url = (await resp.text()).trim();
-                    if (url) window.open(url, '_blank', 'noopener,noreferrer');
-                }
-            } catch {
-                // fallback: just open twivideo page
+    videoFeed.querySelectorAll('.origin-btn').forEach((button, index) => {
+        button.addEventListener('click', async (event) => {
+            event.stopPropagation();
+            const video = videos[index];
+            if (!video) return;
+            if (video.lookup) {
+                try {
+                    const response = await fetch(`/api/external?source=${encodeURIComponent(currentSource.id)}&id=${encodeURIComponent(video.id)}`);
+                    const data = await response.json();
+                    if (data.ok && data.url) {
+                        window.open(data.url, '_blank', 'noopener,noreferrer');
+                        return;
+                    }
+                } catch { /* fall through */ }
             }
-        });
-    });
-
-    // Bottom nav
-    bottomNav.querySelectorAll('.nav-btn').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            const sort = btn.dataset.sort;
-            if (sort === currentSort) return;
-            currentSort = sort;
-
-            bottomNav.querySelectorAll('.nav-btn').forEach((b) => b.classList.remove('active'));
-            btn.classList.add('active');
-
-            loadVideos(sort);
+            const url = video.externalUrl || video.pageUrl;
+            if (url) window.open(url, '_blank', 'noopener,noreferrer');
         });
     });
 }
 
-// ---- Double Tap Heart ----
-function handleDoubleTap(e, index) {
-    // Show heart animation at tap position
-    const card = document.querySelectorAll('.video-card')[index];
-    if (!card) return;
-
-    const heart = document.createElement('div');
-    heart.className = 'double-tap-heart';
-    heart.innerHTML = '<i class="fas fa-heart"></i>';
-
-    const rect = card.getBoundingClientRect();
-    heart.style.left = (e.clientX - rect.left - 40) + 'px';
-    heart.style.top = (e.clientY - rect.top - 40) + 'px';
-
-    card.appendChild(heart);
-    setTimeout(() => heart.remove(), 900);
-
-    // Also toggle like button
-    const likeBtn = card.querySelector('.like-btn');
-    if (likeBtn && !likeBtn.classList.contains('liked')) {
-        likeBtn.classList.add('liked');
-    }
-}
-
-// ---- Mute State ----
-function updateAllMuteState() {
-    document.querySelectorAll('video').forEach((v) => {
-        v.muted = isMuted;
-    });
-
-    document.querySelectorAll('.sound-btn').forEach((btn) => {
-        const icon = btn.querySelector('.btn-icon i');
-        const label = btn.querySelector('.btn-label');
-        if (isMuted) {
-            btn.classList.add('muted');
-            icon.className = 'fas fa-volume-xmark';
-            label.textContent = 'ミュート';
-        } else {
-            btn.classList.remove('muted');
-            icon.className = 'fas fa-volume-high';
-            label.textContent = '音あり';
-        }
-    });
-}
-
-// ---- Load Videos ----
-async function loadVideos(sort = '24') {
+async function loadVideos() {
+    if (!currentSource) return;
+    if (loadController) loadController.abort();
+    loadController = new AbortController();
+    const { signal } = loadController;
+    const source = currentSource;
+    const period = currentPeriod;
     isLoading = true;
-    loadingScreen.classList.remove('hidden');
-
-    // Pause all current videos
-    document.querySelectorAll('video').forEach((v) => {
-        v.pause();
-        v.src = '';
-    });
+    stopAll();
+    setFallbackNote('');
+    setLoading(true, `${source.name} を読み込み中...`);
 
     try {
-        videos = await fetchVideos(sort, 0, 30);
-
-        if (videos.length === 0) {
-            videoFeed.innerHTML = `
-        <div class="error-state">
-          <i class="fas fa-video-slash"></i>
-          <h3>動画が見つかりませんでした</h3>
-          <p>しばらくしてからもう一度お試しください</p>
-          <button onclick="loadVideos('${sort}')">再読み込み</button>
-        </div>
-      `;
-            loadingScreen.classList.add('hidden');
+        const response = await fetch(`/api/videos?source=${encodeURIComponent(source.id)}&period=${encodeURIComponent(period)}`, { signal });
+        const data = await response.json();
+        if (signal.aborted || source.id !== currentSource.id) return;
+        if (!data.ok) {
+            showMessage(`${source.name} を読み込めませんでした`, data.error || '不明なエラー', () => loadVideos());
+            setLoading(false);
             return;
         }
-
+        videos = data.videos || [];
+        setFallbackNote(data.fallback ? data.fallbackReason : '');
+        if (videos.length === 0) {
+            showMessage('動画が見つかりませんでした', 'しばらくしてからもう一度お試しください', () => loadVideos());
+            setLoading(false);
+            return;
+        }
         renderVideos(videos);
         currentVideoIndex = 0;
-
-        // Scroll to top
         videoFeed.scrollTo({ top: 0 });
-
-        // Small delay then hide loading
-        setTimeout(() => {
-            loadingScreen.classList.add('hidden');
-        }, 500);
+        setLoading(false);
     } catch (err) {
-        console.error('Failed to load videos:', err);
-        videoFeed.innerHTML = `
-      <div class="error-state">
-        <i class="fas fa-exclamation-triangle"></i>
-        <h3>読み込みに失敗しました</h3>
-        <p>通信エラーが発生しました。再読み込みしてください。</p>
-        <button onclick="loadVideos('${sort}')">再読み込み</button>
-      </div>
-    `;
-        loadingScreen.classList.add('hidden');
+        if (err.name === 'AbortError') return;
+        showMessage(`${source.name} を読み込めませんでした`, '通信エラーが発生しました。再読み込みしてください。', () => loadVideos());
+        setLoading(false);
     } finally {
         isLoading = false;
     }
 }
 
-// ---- Keyboard Navigation ----
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowDown' || e.key === 'j') {
-        e.preventDefault();
-        const nextCard = document.querySelectorAll('.video-card')[currentVideoIndex + 1];
-        if (nextCard) nextCard.scrollIntoView({ behavior: 'smooth' });
-    } else if (e.key === 'ArrowUp' || e.key === 'k') {
-        e.preventDefault();
-        const prevCard = document.querySelectorAll('.video-card')[currentVideoIndex - 1];
-        if (prevCard) prevCard.scrollIntoView({ behavior: 'smooth' });
-    } else if (e.key === ' ') {
-        e.preventDefault();
+document.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowDown' || event.key === 'j') {
+        event.preventDefault();
+        const next = cardAt(currentVideoIndex + 1);
+        if (next) next.scrollIntoView({ behavior: 'smooth' });
+    } else if (event.key === 'ArrowUp' || event.key === 'k') {
+        event.preventDefault();
+        const prev = cardAt(currentVideoIndex - 1);
+        if (prev) prev.scrollIntoView({ behavior: 'smooth' });
+    } else if (event.key === ' ') {
+        event.preventDefault();
         togglePlayPause(currentVideoIndex);
-    } else if (e.key === 'm') {
+    } else if (event.key === 'm') {
         isMuted = !isMuted;
         updateAllMuteState();
     }
 });
 
-// ---- Init ----
-loadVideos('24');
+async function init() {
+    setLoading(true, 'サイトを読み込み中...');
+    try {
+        const response = await fetch('/api/sources');
+        const data = await response.json();
+        sources = data.sources || [];
+        if (sources.length === 0) throw new Error('ソースがありません');
+        const saved = localStorage.getItem(STORAGE_SOURCE);
+        currentSource = sources.find((source) => source.id === saved) || sources[0];
+        const savedPeriod = localStorage.getItem(STORAGE_PERIOD + currentSource.id);
+        currentPeriod = currentSource.periods.some((period) => period.id === savedPeriod)
+            ? savedPeriod
+            : currentSource.periods[0].id;
+        renderSourceBar();
+        renderPeriodBar();
+        await loadVideos();
+    } catch (err) {
+        showMessage('起動に失敗しました', err.message || 'ソース一覧を取得できませんでした', () => init());
+        setLoading(false);
+    }
+}
+
+init();

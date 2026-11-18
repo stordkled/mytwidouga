@@ -1,7 +1,7 @@
 {
     "name": "TWIVIDEO Shorts",
     "short_name": "TVI Shorts",
-    "description": "Twitter/X動画ランキングをYouTube Shorts風に閲覧",
+    "description": "複数サイトの動画ランキングをYouTube Shorts風に閲覧",
     "start_url": "/",
     "display": "standalone",
     "orientation": "portrait",

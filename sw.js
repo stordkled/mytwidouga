@@ -1,4 +1,4 @@
-const CACHE_NAME = 'twivideo-shorts-v1';
+const CACHE_NAME = 'twivideo-shorts-v2';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
