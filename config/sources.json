@@ -42,6 +42,13 @@
         "https://missav123.com"
       ],
       "playlistHosts": ["surrit.com"]
+    },
+    "twikeep": {
+      "bases": ["https://www.twikeep.com"],
+      "metric": "downloads"
+    },
+    "twihozon": {
+      "bases": ["https://www.twihozon.org"]
     }
   }
 }

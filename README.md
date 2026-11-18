@@ -35,6 +35,7 @@ Edit `config/sources.json`, or override it without a code change:
 | `MAX_PROXY_STREAMS_PER_CLIENT` | Relays one viewer (IP) may hold at once. Default 2, so one phone cannot take every slot. |
 | `PROXY_QUEUE_MS` | How long a relay request waits for a free slot before `429`. Default 8 seconds. |
 | `TRUST_PROXY` | `1` keys the per-viewer cap on `X-Forwarded-For`. Only set this behind your own reverse proxy. |
+| `SOURCE_METRIC_TWIKEEP` | `downloads` (default, saves) or `views`. Same as `"metric"` under `twikeep` in the JSON. |
 | `SOURCE_HIDDEN_MISSAV` | `1`/`0` overrides `"hidden"` for one source. Hidden sources stay in the API but not in the switcher. |
 | `BROWSER_IDLE_MS` | Headless Chrome (if a source uses it) is closed after this long without a page. Default 5 minutes. |
 
@@ -64,8 +65,12 @@ The media URL is resolved when the card is about to play. If that attempt fails,
 | `85po` | 85po.com, then 85po.net, then 85ro.com | 24時間 / 1週間 / 1ヶ月 | `get_file` MP4, then `https://<base>/embed/<id>/`. |
 | `tokyomotion` | tokyomotion.net | 今日 / 今週 / 今月 | `/vsrc/` MP4. The official embed is `https://<base>/embed/<token>` from the watch page, not the numeric id. |
 | `missav` | missav.ws, missav.ai, missav.live, missav123.com | 今日 / 週間 / 月間 | Playlist on `surrit.com` when the watch HTML is readable. No official embed URL was found; set `SOURCE_EMBED_MISSAV` if you have one. |
+| `twikeep` | twikeep.com | 24時間 / 1週間 / 1ヶ月 / 1年 (`range=24h\|1w\|1m\|1y`) | The `/ranking` page is client-rendered, so the adapter reads the public JSON it loads, `/api/ranking?metric=downloads&range=…`, over plain HTTP (no browser). Ranked by saves (`downloads`) by default; `"metric": "views"` in config or `SOURCE_METRIC_TWIKEEP=views` switches to views. Direct `video.twimg.com` MP4 and `pbs.twimg.com` thumbnail. |
+| `twihozon` | twihozon.org | 24時間 / 1週間 / 1ヶ月 (`/`, `/week.html`, `/month.html`) | Direct `video.twimg.com` MP4 from the listing HTML. A card without one resolves from `/play-<id>-video.html`. The all-time board (`/all.html`) is not offered. |
 
-None of these sites publish a 3-day board. The old 3-day tab did not map to a twivideo ranking either. Asking for `period=3d` (or the legacy `sort=3days`) returns the nearest real board and sets `fallback` so the UI can say so. The period tabs themselves are the periods that source exports, so a month board shows up as 1ヶ月 / 月間 instead of a mislabeled week.
+Both Twitter sources start on the **direct** step (the Twitter CDN plays without a Referer). If that fails, the usual ladder applies. Neither has an embed. Their proxy allowlist is `twimg.com` only.
+
+None of the sites publish a 3-day board. Only TwiKeep has a 1年 board; asking another source for `period=1y` falls back to its month board. The old 3-day tab did not map to a twivideo ranking either. Asking for `period=3d` (or the legacy `sort=3days`) returns the nearest real board and sets `fallback` so the UI can say so. The period tabs themselves are the periods that source exports, so a month board shows up as 1ヶ月 / 月間 instead of a mislabeled week.
 
 The last site and its period are stored in `localStorage`.
 

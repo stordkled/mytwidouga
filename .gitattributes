@@ -1,0 +1,3 @@
+# Preserve the bytes and upstream whitespace of saved HTTP responses.
+test/fixtures/twihozon-top.html -text -whitespace
+test/fixtures/twihozon-play-14725.html -text -whitespace

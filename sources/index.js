@@ -12,6 +12,8 @@ const adapters = [
     require('./85po'),
     require('./tokyomotion'),
     require('./missav'),
+    require('./twikeep'),
+    require('./twihozon'),
 ];
 
 const REQUIRED = ['id', 'name', 'periods', 'mediaHosts', 'mediaReferer', 'fetchRanking'];

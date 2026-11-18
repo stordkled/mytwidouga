@@ -213,9 +213,11 @@ test('missav cards and surrit playlist id', () => {
     );
 });
 
-test('registry exposes the five sources and only their periods', () => {
+test('registry exposes the seven sources and only their periods', () => {
     const list = sources.list();
-    assert.deepEqual(list.map((source) => source.id), ['twivideo', 'pornhub', '85po', 'tokyomotion', 'missav']);
+    assert.deepEqual(list.map((source) => source.id), [
+        'twivideo', 'pornhub', '85po', 'tokyomotion', 'missav', 'twikeep', 'twihozon',
+    ]);
     for (const source of list) {
         assert.ok(source.periods.length >= 1);
         assert.equal(source.periods.some((period) => period.id === '3d'), false);

@@ -101,6 +101,7 @@ function periodIcon(id) {
     if (id === '24h') return 'fa-fire';
     if (id === '7d') return 'fa-chart-line';
     if (id === '30d') return 'fa-trophy';
+    if (id === '1y') return 'fa-crown';
     return 'fa-clock';
 }
 
