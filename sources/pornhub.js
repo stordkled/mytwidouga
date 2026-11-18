@@ -177,15 +177,16 @@ function firstUri(playlist) {
 }
 
 async function fetchBytes(url, referer, headers) {
+    const requestHeaders = {
+        'User-Agent': UA,
+        Accept: '*/*',
+        ...headers,
+    };
+    if (referer) requestHeaders.Referer = referer;
     const response = await fetch(url, {
         redirect: 'follow',
         signal: AbortSignal.timeout(12000),
-        headers: {
-            'User-Agent': UA,
-            Accept: '*/*',
-            Referer: referer,
-            ...headers,
-        },
+        headers: requestHeaders,
     });
     return response;
 }
@@ -285,10 +286,25 @@ async function expandItem(item, referer, cookie) {
     return expanded;
 }
 
+function choosePlayable(file, hls) {
+    if (file && !file.needsReferer) return file;
+    if (file) return file;
+    return hls || null;
+}
+
 async function candidatePlays(media, referer) {
     try {
         if (media.kind === 'hls') return await hlsPlays(media.url, referer);
-        return await fileStarts(media.url, referer);
+        const withReferer = await fileStarts(media.url, referer);
+        if (!withReferer) return false;
+        let withoutReferer = false;
+        try {
+            withoutReferer = await fileStarts(media.url, '');
+        } catch {
+            withoutReferer = false;
+        }
+        media.needsReferer = !withoutReferer;
+        return true;
     } catch {
         return false;
     }
@@ -309,19 +325,29 @@ async function findPlayable(base, id) {
         const failure = responseFailure(response);
         if (failure) throw new Error(failure);
         cookie = mergeCookies(cookie, response.cookies);
+        let file = null;
+        let hls = null;
         let probedShort = false;
         for (const item of rankMedia(extractMediaDefinitions(response.text))) {
+            if (file && hls) break;
             const options = await expandItem(item, referer, cookie);
             for (const media of options) {
+                if (media.kind === 'file' && file) continue;
+                if (media.kind === 'hls' && hls) continue;
                 if (media.kind === 'hls' && shortSignedHls(media.url)) {
                     if (probedShort) continue;
                     probedShort = true;
                 }
                 if (await candidatePlays(media, referer)) {
-                    console.log(`[pornhub] playable ${media.kind} on attempt ${attempt + 1} (${new URL(media.url).host})`);
-                    return media;
+                    if (media.kind === 'file') file = media;
+                    else hls = media;
                 }
             }
+        }
+        const chosen = choosePlayable(file, hls);
+        if (chosen) {
+            console.log(`[pornhub] playable ${chosen.kind} on attempt ${attempt + 1} (${new URL(chosen.url).host})`);
+            return chosen;
         }
     }
     return null;
@@ -366,7 +392,13 @@ async function resolvePlayback(id) {
             if (!media) throw new Error('no playable media');
             return media;
         });
-        return { kind: result.kind, url: result.url, embedUrl, referer: `${currentBase()}/` };
+        return {
+            kind: result.kind,
+            url: result.url,
+            embedUrl,
+            referer: `${currentBase()}/`,
+            needsReferer: !!result.needsReferer,
+        };
     } catch (err) {
         if (!embedUrl) throw err;
         return { kind: 'embed', url: embedUrl, embedUrl, referer: `${currentBase()}/` };
@@ -394,6 +426,7 @@ module.exports = {
     pickMedia,
     rankMedia,
     shortSignedHls,
+    choosePlayable,
     SELECTORS,
     PERIODS,
 };

@@ -128,6 +128,12 @@ test('pornhub listing parser and safe-for-work guard', () => {
     assert.equal(ranked[0].videoUrl.includes('ev-h.phncdn.com'), true);
     assert.equal(pornhub.shortSignedHls(ranked[0].videoUrl), false);
     assert.equal(pornhub.shortSignedHls('https://hv-h.phncdn.com/hls/a/master.m3u8?h=abc&e=1'), true);
+    const directFile = { kind: 'file', url: 'https://ev.phncdn.com/a.mp4', needsReferer: false };
+    const lockedFile = { kind: 'file', url: 'https://ev.phncdn.com/b.mp4', needsReferer: true };
+    const hls = { kind: 'hls', url: 'https://ev-h.phncdn.com/a.m3u8' };
+    assert.equal(pornhub.choosePlayable(directFile, hls), directFile);
+    assert.equal(pornhub.choosePlayable(lockedFile, hls).kind, 'file');
+    assert.equal(pornhub.choosePlayable(null, hls), hls);
 });
 
 test('85po popular cards and mp4 picker', () => {

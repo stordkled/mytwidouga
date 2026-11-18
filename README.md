@@ -53,7 +53,7 @@ The media URL is resolved when the card is about to play. If that attempt fails,
 | id | Site | Periods | Playback |
 | --- | --- | --- | --- |
 | `twivideo` | twivideo.net | 24時間 / 1週間 / 1ヶ月 | Direct MP4 when the HTML is reachable. No official embed unless `SOURCE_EMBED_TWIVIDEO` is set. |
-| `pornhub` | pornhub.com, then jp and rt | 24時間 / 1週間 / 1ヶ月 (`/video?o=mv&t=t\|w\|m`) | HLS from `mediaDefinitions`. The resolver refetches the watch page until a signed URL returns a playlist and a segment (the `hv-h` `?h=&e=` form answers 410), then `https://<base>/embed/<viewkey>` if none do. Segments need `Referer: https://www.pornhub.com/`, which the relay sends. A safe-for-work redirect tries the next domain. |
+| `pornhub` | pornhub.com, then jp and rt | 24時間 / 1週間 / 1ヶ月 (`/video?o=mv&t=t\|w\|m`) | A progressive MP4 when the watch page has one (played directly if it loads with no referrer, otherwise through the relay), else HLS. The resolver skips signed URLs whose playlist or segment does not load (the `hv-h` `?h=&e=` form answers 410). A safe-for-work redirect tries the next domain. |
 | `85po` | 85po.com, then 85po.net, then 85ro.com | 24時間 / 1週間 / 1ヶ月 | `get_file` MP4, then `https://<base>/embed/<id>/`. |
 | `tokyomotion` | tokyomotion.net | 今日 / 今週 / 今月 | `/vsrc/` MP4. The official embed is `https://<base>/embed/<token>` from the watch page, not the numeric id. |
 | `missav` | missav.ws, missav.ai, missav.live, missav123.com | 今日 / 週間 / 月間 | Playlist on `surrit.com` when the watch HTML is readable. No official embed URL was found; set `SOURCE_EMBED_MISSAV` if you have one. |

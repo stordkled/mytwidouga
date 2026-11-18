@@ -76,12 +76,13 @@ function playlistProxy(sourceId, url) {
     return `/proxy/playlist?source=${encodeURIComponent(sourceId)}&url=${encodeURIComponent(url)}`;
 }
 
-function modesFor(mode, hls) {
+function modesFor(mode, hls, needsReferer) {
     if (mode === 'embed') return ['embed'];
     const start = !mode || mode === 'auto' ? 0 : PLAYBACK_LADDER.indexOf(mode);
     let list = start >= 0 ? PLAYBACK_LADDER.slice(start) : PLAYBACK_LADDER.slice();
     if (!playbackConfig.fullProxyEnabled) list = list.filter((item) => item !== 'proxy');
     if (!hls) list = list.filter((item) => item !== 'playlist-proxy');
+    if (needsReferer) list = list.filter((item) => item === 'proxy' || item === 'embed');
     if (!list.includes('embed')) list.push('embed');
     return list;
 }
@@ -205,7 +206,7 @@ function createVideoCard(video, index) {
 
     card.innerHTML = `
     <div class="video-wrapper">
-      <video loop muted playsinline preload="none" referrerpolicy="no-referrer" ${poster ? `poster="${poster.replace(/"/g, '')}"` : ''}></video>
+      <video muted playsinline preload="none" referrerpolicy="no-referrer" ${poster ? `poster="${poster.replace(/"/g, '')}"` : ''}></video>
     </div>
     <div class="gradient-top"></div>
     <div class="gradient-bottom"></div>
@@ -251,6 +252,27 @@ function createVideoCard(video, index) {
     card.querySelector('.info-title').textContent = video.title || `ランキング ${video.rankLabel || video.rank}`;
     const meta = [video.duration, video.views].filter(Boolean).join(' · ');
     card.querySelector('.info-meta').textContent = meta;
+    const media = card.querySelector('video');
+    media.addEventListener('error', () => {
+        if (media.getAttribute('poster')) media.removeAttribute('poster');
+    });
+    media.addEventListener('ended', () => {
+        if (media.dataset.rewinding === '1') return;
+        media.dataset.rewinding = '1';
+        const resume = () => {
+            media.dataset.rewinding = '';
+            const playPromise = media.play();
+            if (playPromise) playPromise.catch(() => {});
+        };
+        try {
+            media.currentTime = 0;
+        } catch {
+            media.dataset.rewinding = '';
+            return;
+        }
+        if (media.currentTime < 0.05) resume();
+        else media.addEventListener('seeked', resume, { once: true });
+    });
 
     if (index === 0) {
         const hint = document.createElement('div');
@@ -443,18 +465,16 @@ function waitUntilPlaying(media, timeout = 8000) {
             resolve(false);
             return;
         }
-        const timer = setTimeout(() => finish(media.readyState >= 2 && !media.error), timeout);
-        const ok = () => finish(true);
+        const timer = setTimeout(() => finish(false), timeout);
+        const ok = () => finish(!media.error && media.currentTime > 0);
         const bad = () => finish(false);
         function finish(success) {
             clearTimeout(timer);
-            media.removeEventListener('playing', ok);
-            media.removeEventListener('loadeddata', ok);
+            media.removeEventListener('timeupdate', ok);
             media.removeEventListener('error', bad);
             resolve(success);
         }
-        media.addEventListener('playing', ok);
-        media.addEventListener('loadeddata', ok);
+        media.addEventListener('timeupdate', ok);
         media.addEventListener('error', bad);
     });
 }
@@ -492,10 +512,11 @@ function mountHls(card, index, url) {
         card._hls = null;
     }
     const hls = new window.Hls({
-        enableWorker: false,
+        enableWorker: true,
         lowLatencyMode: false,
-        maxBufferLength: 12,
-        backBufferLength: 30,
+        maxBufferLength: 8,
+        maxMaxBufferLength: 14,
+        maxBufferSize: 8 * 1000 * 1000,
     });
     card._hls = hls;
     return new Promise((resolve) => {
@@ -503,23 +524,23 @@ function mountHls(card, index, url) {
         const finish = (ok) => {
             if (settled) return;
             settled = true;
+            clearTimeout(timer);
+            media.removeEventListener('timeupdate', progress);
             if (!ok && card._hls === hls) {
                 hls.destroy();
                 card._hls = null;
             }
             resolve(ok);
         };
-        const timer = setTimeout(() => finish(false), 8000);
+        const timer = setTimeout(() => finish(media.currentTime > 0 && !media.error), 8000);
+        const progress = () => {
+            if (media.currentTime > 0 && !media.error) finish(true);
+        };
+        media.addEventListener('timeupdate', progress);
         hls.on(window.Hls.Events.ERROR, (_, data) => {
-            if (data && data.fatal) {
-                clearTimeout(timer);
-                finish(false);
-            }
+            if (data && data.fatal) finish(false);
         });
-        hls.on(window.Hls.Events.FRAG_LOADED, () => {
-            clearTimeout(timer);
-            finish(true);
-        });
+        hls.on(window.Hls.Events.FRAG_LOADED, progress);
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
             media.muted = isMuted;
             media.play().then(() => {
@@ -571,17 +592,32 @@ async function tryMode(mode, playback, card, index) {
     return played;
 }
 
+let syncPlay = false;
+const MAX_LADDER_STEPS = 6;
+
+function yieldToBrowser() {
+    return new Promise((resolve) => {
+        setTimeout(resolve, 0);
+    });
+}
+
 async function playCard(index) {
+    if (syncPlay) return;
     const card = cardAt(index);
     const video = videos[index];
     if (!card || !video) return;
     if (activePlay === index) return;
+    syncPlay = true;
     activePlay = index;
     const token = ++playToken;
     currentVideoIndex = index;
-    videoFeed.querySelectorAll('.video-card').forEach((other, otherIndex) => {
-        if (otherIndex !== index) stopCard(other);
-    });
+    try {
+        videoFeed.querySelectorAll('.video-card').forEach((other, otherIndex) => {
+            if (otherIndex !== index) stopCard(other);
+        });
+    } finally {
+        syncPlay = false;
+    }
 
     const forced = (playbackConfig.sources && playbackConfig.sources[currentSource.id]) || playbackConfig.mode || 'auto';
     let playback = video.playback;
@@ -592,16 +628,20 @@ async function playCard(index) {
     }
     if (token !== playToken || currentVideoIndex !== index) return;
 
-    let modes = modesFor(forced, isHls(playback));
+    let modes = modesFor(forced, isHls(playback), playback && playback.needsReferer);
     const known = sourceStrategy.get(currentSource.id);
-    if (known) {
+    if (known && !playback.needsReferer) {
         const at = modes.indexOf(known);
         if (at > 0) modes = modes.slice(at);
     }
 
     let resolvedOnceMore = false;
-    for (let i = 0; i < modes.length; i += 1) {
+    let steps = 0;
+    for (let i = 0; i < modes.length && steps < MAX_LADDER_STEPS; i += 1) {
         const mode = modes[i];
+        steps += 1;
+        if (token !== playToken || currentVideoIndex !== index) return;
+        await yieldToBrowser();
         if (token !== playToken || currentVideoIndex !== index) return;
         let ok = await tryMode(mode, playback, card, index);
         if (!ok && mode !== 'embed' && !resolvedOnceMore && video.playback.kind === 'resolve') {
@@ -610,7 +650,9 @@ async function playCard(index) {
                 playback = await resolvePlayback(video, true);
             } catch { /* keep the previous URL */ }
             if (token !== playToken || currentVideoIndex !== index) return;
-            ok = await tryMode(mode, playback, card, index);
+            modes = modesFor(forced, isHls(playback), playback && playback.needsReferer);
+            i = -1;
+            continue;
         }
         if (ok) {
             if (forced === 'auto') sourceStrategy.set(currentSource.id, mode);
