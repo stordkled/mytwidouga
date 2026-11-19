@@ -77,7 +77,8 @@ test('weights use saves > likes > views > rank, log-compressed with a floor', ()
     assert.equal(ranked.length, 24);
     for (let i = 1; i < ranked.length; i += 1) assert.ok(ranked[i] < ranked[i - 1], 'higher rank, higher weight');
     assert.ok(ranked[23] >= Logic.MIN_WEIGHT && ranked[23] > 0);
-    assert.ok(ranked[0] / ranked[23] < 6, 'the spread is bounded');
+    assert.ok(ranked[0] / ranked[23] <= 1 / Logic.MIN_WEIGHT + 1e-9, 'the spread is bounded by the floor');
+    assert.ok(ranked[0] / ranked[23] > 6, 'and strong enough that the top clearly leads');
 
     const zeros = Logic.feedWeights(board(3, () => ({ stats: { saves: 0 } })));
     assert.ok(zeros[0] > zeros[2], 'all-zero counts fall back to rank');
@@ -137,6 +138,40 @@ test('without any numbers the board rank drives the shuffle', () => {
     }
     const avg = position.map((sum) => sum / runs);
     assert.ok(avg[0] < avg[11] && avg[11] < avg[23], `No.1 ${avg[0].toFixed(1)}, No.12 ${avg[11].toFixed(1)}, No.24 ${avg[23].toFixed(1)}`);
+});
+
+test('the weighting is "somewhat random": the top is front-loaded, not a plain shuffle, and the bottom still shows', () => {
+    assert.ok(Logic.MIN_WEIGHT > 0 && Logic.MIN_WEIGHT <= 0.1, 'a low floor, but never zero');
+    assert.ok(Logic.WEIGHT_CURVE > 1, 'scores are curved, not linear');
+    const items = board(24);
+    const rng = seeded(4242);
+    const runs = 4000;
+    let topFirst = 0;
+    let topFiveFirst = 0;
+    let bottomHalfFirst = 0;
+    let bottomInTopFive = 0;
+    let lastFirst = 0;
+    const position = new Array(items.length).fill(0);
+    for (let run = 0; run < runs; run += 1) {
+        const out = Logic.orderFeed(items, 'random', { rng });
+        const first = out[0].rank;
+        if (first === 1) topFirst += 1;
+        if (first <= 5) topFiveFirst += 1;
+        if (first > 12) bottomHalfFirst += 1;
+        if (first === 24) lastFirst += 1;
+        if (out.slice(0, 5).some((video) => video.rank > 12)) bottomInTopFive += 1;
+        out.forEach((video, at) => { position[video.rank - 1] += at; });
+    }
+    const avg = position.map((sum) => sum / runs);
+    // A uniform shuffle would give 1/24 (~4%) and 5/24 (~21%).
+    assert.ok(topFirst > runs * 0.15, `No.1 opens ${topFirst}/${runs}`);
+    assert.ok(topFirst < runs * 0.35, 'but not almost always');
+    assert.ok(topFiveFirst > runs * 0.5, `the top five open ${topFiveFirst}/${runs}`);
+    assert.ok(avg[0] < 4, `No.1 sits near the front on average (${avg[0].toFixed(2)})`);
+    assert.ok(avg[23] > 14, `No.24 sits near the back on average (${avg[23].toFixed(2)})`);
+    assert.ok(bottomHalfFirst > runs * 0.08, `the bottom half still opens sometimes (${bottomHalfFirst})`);
+    assert.ok(lastFirst > 0 && lastFirst < runs * 0.03, `the very last opens rarely (${lastFirst})`);
+    assert.ok(bottomInTopFive > runs * 0.3, `a bottom-half video reaches the top five in ${bottomInTopFive}/${runs}`);
 });
 
 test('orderFeed: ranking order is untouched, duplicates are dropped either way', () => {

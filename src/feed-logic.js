@@ -41,10 +41,10 @@
     }
 
     // The source a page opens on. The one this browser saved, if it is still
-    // offered; otherwise TwiKeep; otherwise the first offered one. A saved id
-    // the server no longer has (a removed source) or a hidden one falls
-    // through to the default instead of failing.
-    const DEFAULT_SOURCE_ID = 'twikeep';
+    // offered; otherwise Pornhub; otherwise the first offered one (85po in
+    // the registry order). A saved id the server no longer has (a removed
+    // source) or a hidden one falls through to the default instead of failing.
+    const DEFAULT_SOURCE_ID = 'pornhub';
 
     function initialSource(offered, savedId) {
         const list = offered || [];
@@ -390,19 +390,32 @@
     }
 
     // Every video keeps at least this share of the top weight, so the
-    // bottom of a board still turns up now and then.
-    const MIN_WEIGHT = 0.2;
+    // bottom of a board still turns up now and then (about 1 in 20 against
+    // the top video).
+    const MIN_WEIGHT = 0.05;
+    // The log-compressed score (0..1) is raised to this power before the
+    // floor is added. 1 would be a gentle tilt close to a plain shuffle; 2
+    // makes the popular end of a board clearly front-loaded ("ある程度
+    // ランダム") while the middle and bottom still get picked.
+    const WEIGHT_CURVE = 2;
+
+    function curveWeight(share) {
+        const s = Number.isFinite(share) ? Math.min(Math.max(share, 0), 1) : 0;
+        if (s >= 1) return 1;
+        return MIN_WEIGHT + (1 - MIN_WEIGHT) * Math.pow(s, WEIGHT_CURVE);
+    }
 
     function rankOf(video, index) {
         const rank = video && Number(video.rank);
         return Number.isFinite(rank) && rank >= 1 ? rank : index + 1;
     }
 
-    // One weight per video, in (MIN_WEIGHT, 1]. The list uses the best
+    // One weight per video, in [MIN_WEIGHT, 1]. The list uses the best
     // signal any of its videos has (saves > likes > views); a video without
     // that number gets the floor. Counts are log-compressed so a 100x lead
-    // does not mean "always first". With no numbers at all the board rank
-    // is used (No.1 heaviest).
+    // does not mean "always first", then curved (WEIGHT_CURVE) so the top
+    // of the board leads clearly. With no numbers at all the board rank is
+    // used (No.1 heaviest).
     function feedWeights(list) {
         const items = Array.isArray(list) ? list : [];
         if (items.length === 0) return [];
@@ -412,7 +425,7 @@
             const counts = stats.map((entry) => entry[key] || 0);
             const top = Math.log1p(Math.max(...counts));
             if (top > 0) {
-                return counts.map((count) => MIN_WEIGHT + (1 - MIN_WEIGHT) * (Math.log1p(count) / top));
+                return counts.map((count) => curveWeight(Math.log1p(count) / top));
             }
         }
         const ranks = items.map(rankOf);
@@ -420,7 +433,7 @@
         const span = Math.log(size + 1);
         return ranks.map((rank) => {
             const clamped = Math.min(Math.max(rank, 1), size);
-            return MIN_WEIGHT + (1 - MIN_WEIGHT) * (Math.log((size + 1) / clamped) / span);
+            return curveWeight(Math.log((size + 1) / clamped) / span);
         });
     }
 
@@ -476,7 +489,134 @@
         return current.concat(orderFeed(page, order, { ...options, exclude }));
     }
 
+    // ---- Seek bar (シークバー) ----------------------------------------------
+    // The card's <video> is the same element for direct, playlist-proxy (HLS)
+    // and full proxy playback, so one set of numbers covers all three. An
+    // embed (iframe) cannot be seeked from here and hides the bar.
+
+    const UNKNOWN_TIME = '--:--';
+    // A stream with no finite duration counts as seekable only when the
+    // browser reports a window at least this long (a live HLS window).
+    const MIN_SEEK_WINDOW = 1;
+    // Never seek onto the very last frame: that fires "ended" (the card
+    // would loop back to 0) instead of showing the chosen spot.
+    const SEEK_END_GUARD = 0.25;
+    const SEEK_STEP = 5;
+
+    // 0 -> "0:00", 65 -> "1:05", 3661 -> "1:01:01"; unknown -> "--:--".
+    function formatTime(seconds) {
+        if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return UNKNOWN_TIME;
+        const total = Math.floor(seconds);
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const secs = String(total % 60).padStart(2, '0');
+        return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${secs}` : `${minutes}:${secs}`;
+    }
+
+    function clamp01(value) {
+        if (!Number.isFinite(value)) return 0;
+        return Math.min(Math.max(value, 0), 1);
+    }
+
+    function finiteOr(value, fallback) {
+        return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+    }
+
+    // What the bar shows for a media element's numbers. `duration` NaN
+    // (nothing loaded) or Infinity (live) never throws: a live stream with
+    // a seekable window seeks inside that window, anything else is shown as
+    // "--:--" and cannot be dragged.
+    function seekInfo(timing) {
+        const t = timing || {};
+        const now = Math.max(0, finiteOr(t.currentTime, 0));
+        const duration = t.duration;
+        if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
+            return {
+                canSeek: true,
+                live: false,
+                start: 0,
+                end: duration,
+                position: clamp01(now / duration),
+                currentText: formatTime(Math.min(now, duration)),
+                totalText: formatTime(duration),
+            };
+        }
+        const start = Math.max(0, finiteOr(t.seekableStart, 0));
+        const end = finiteOr(t.seekableEnd, NaN);
+        if (Number.isFinite(end) && end - start >= MIN_SEEK_WINDOW) {
+            return {
+                canSeek: true,
+                live: true,
+                start,
+                end,
+                position: clamp01((now - start) / (end - start)),
+                currentText: formatTime(now),
+                totalText: 'LIVE',
+            };
+        }
+        return {
+            canSeek: false,
+            live: duration === Infinity,
+            start: 0,
+            end: 0,
+            position: 0,
+            currentText: formatTime(now),
+            totalText: duration === Infinity ? 'LIVE' : UNKNOWN_TIME,
+        };
+    }
+
+    // Pointer x on the track -> 0..1 (outside the track clamps to an end).
+    function seekRatio(clientX, left, width) {
+        if (!Number.isFinite(clientX) || !Number.isFinite(left) || !(width > 0)) return 0;
+        return clamp01((clientX - left) / width);
+    }
+
+    // Keep a time inside what `info` can seek to (null when it cannot seek).
+    function clampSeekTime(time, info) {
+        if (!info || !info.canSeek || !Number.isFinite(time)) return null;
+        const span = info.end - info.start;
+        const last = span > SEEK_END_GUARD * 4 ? info.end - SEEK_END_GUARD : info.end;
+        return Math.min(Math.max(time, info.start), last);
+    }
+
+    // 0..1 along the bar -> seconds to set as currentTime.
+    function seekTarget(ratio, info) {
+        if (!info || !info.canSeek) return null;
+        return clampSeekTime(info.start + clamp01(ratio) * (info.end - info.start), info);
+    }
+
+    // Keyboard: ±seconds from the current time.
+    function seekBy(info, currentTime, delta) {
+        if (!info || !info.canSeek || !Number.isFinite(delta)) return null;
+        return clampSeekTime(finiteOr(currentTime, info.start) + delta, info);
+    }
+
+    // Where a time sits on the bar (0..1).
+    function seekPosition(time, info) {
+        if (!info || !info.canSeek || !Number.isFinite(time)) return 0;
+        return clamp01((time - info.start) / (info.end - info.start));
+    }
+
+    // 'hidden' for an embed (the iframe player has its own controls),
+    // 'disabled' while nothing seekable is loaded, else 'active'.
+    function seekbarState(info, embedded) {
+        if (embedded) return 'hidden';
+        return info && info.canSeek ? 'active' : 'disabled';
+    }
+
     return {
+        formatTime,
+        seekInfo,
+        seekRatio,
+        seekTarget,
+        clampSeekTime,
+        seekBy,
+        seekPosition,
+        seekbarState,
+        SEEK_STEP,
+        SEEK_END_GUARD,
+        UNKNOWN_TIME,
+        WEIGHT_CURVE,
         FEED_ORDERS,
         DEFAULT_FEED_ORDER,
         pickFeedOrder,

@@ -194,10 +194,13 @@ test('tokyomotion cards and vsrc playback', () => {
 test('registry exposes the six sources in switcher order and only their periods', () => {
     const list = sources.list();
     assert.deepEqual(list.map((source) => source.id), [
-        'twivideo', 'twikeep', '85po', 'pornhub', 'tokyomotion', 'twihozon',
+        'pornhub', '85po', 'twivideo', 'twikeep', 'tokyomotion', 'twihozon',
     ]);
-    assert.equal(list[0].hidden, true, 'twivideo stays hidden');
-    assert.deepEqual(list.filter((source) => !source.hidden).slice(0, 2).map((source) => source.id), ['twikeep', '85po']);
+    assert.equal(list.find((source) => source.id === 'twivideo').hidden, true, 'twivideo stays hidden');
+    assert.equal(list.some((source) => source.id === 'missav'), false, 'MissAV stays removed');
+    assert.deepEqual(list.filter((source) => !source.hidden).map((source) => source.id), [
+        'pornhub', '85po', 'twikeep', 'tokyomotion', 'twihozon',
+    ]);
     for (const source of list) {
         assert.ok(source.periods.length >= 1);
         assert.equal(source.periods.some((period) => period.id === '3d'), false);

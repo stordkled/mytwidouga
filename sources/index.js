@@ -9,12 +9,13 @@ const { withAutoplay } = require('../lib/playback');
 // Register a source by adding its module here. The file must export the
 // fields documented in the README section "Adding a source".
 // The order is the switcher order and the automatic fallback order; the
-// first visible one is what a browser with no saved source opens.
+// first visible one is what a browser with no saved source opens
+// (Pornhub, then 85po; the client's DEFAULT_SOURCE_ID is Pornhub too).
 const adapters = [
+    require('./pornhub'),
+    require('./85po'),
     require('./twivideo'),
     require('./twikeep'),
-    require('./85po'),
-    require('./pornhub'),
     require('./tokyomotion'),
     require('./twihozon'),
 ];

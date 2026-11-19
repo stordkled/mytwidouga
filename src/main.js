@@ -564,7 +564,10 @@ function createVideoCard(video, index) {
       <div class="info-title"></div>
       <div class="info-meta"></div>
     </div>
-    <div class="video-progress"><div class="progress-fill" id="progress-${index}"></div></div>
+    <div class="video-seek disabled" role="slider" tabindex="-1" aria-label="再生位置" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0:00 / ${Logic.UNKNOWN_TIME}">
+      <div class="seek-time"><span class="seek-current">0:00</span> / <span class="seek-total">${Logic.UNKNOWN_TIME}</span></div>
+      <div class="seek-track"><div class="progress-fill" id="progress-${index}"></div><div class="seek-thumb"></div></div>
+    </div>
     `;
 
     card.querySelector('.ranking-badge span').textContent = video.rankLabel || `No.${video.rank}`;
@@ -600,6 +603,7 @@ function createVideoCard(video, index) {
             media.dataset.rewinding = '';
         }
     });
+    bindSeekbar(card);
 
     if (index === 0) {
         const hint = document.createElement('div');
@@ -658,8 +662,8 @@ function stopCard(card) {
     if (hint) hint.remove();
     const overlay = card.querySelector('.play-pause-overlay');
     if (overlay) overlay.style.display = '';
-    const progress = card.querySelector('.video-progress');
-    if (progress) progress.style.display = '';
+    const seek = card.querySelector('.video-seek');
+    if (seek) seek.style.display = '';
 }
 
 function stopAll() {
@@ -688,16 +692,155 @@ function showCardMessage(card, text) {
     note.textContent = text;
 }
 
-function startProgressTracking(media, index) {
-    const progressFill = document.getElementById(`progress-${index}`);
-    if (!progressFill || media.dataset.progress === '1') return;
-    media.dataset.progress = '1';
-    const update = () => {
-        const duration = media.duration;
-        if (!Number.isFinite(duration) || duration <= 0) return;
-        progressFill.style.width = ((media.currentTime / duration) * 100) + '%';
+// ---- Seek bar -------------------------------------------------------------
+// Every playback step except embed plays in the card's own <video> (direct
+// file, hls.js / native HLS, /proxy/playlist, /proxy/media), so the bar reads
+// and sets that element's time whichever step won.
+
+function mediaTiming(media) {
+    if (!media || media.error || !(media.getAttribute('src') || media.currentSrc)) return Logic.seekInfo(null);
+    let seekableStart = NaN;
+    let seekableEnd = NaN;
+    try {
+        const ranges = media.seekable;
+        if (ranges && ranges.length > 0) {
+            seekableStart = ranges.start(0);
+            seekableEnd = ranges.end(ranges.length - 1);
+        }
+    } catch { /* no ranges yet */ }
+    return Logic.seekInfo({
+        duration: media.duration,
+        currentTime: media.currentTime,
+        seekableStart,
+        seekableEnd,
+    });
+}
+
+// `previewTime`: while dragging, show the spot under the finger instead of
+// the playing position.
+function renderSeek(card, info, previewTime) {
+    const bar = card && card.querySelector('.video-seek');
+    if (!bar) return;
+    const state = Logic.seekbarState(info, Boolean(card.querySelector('iframe.embed-player')));
+    if (state === 'hidden') {
+        bar.style.display = 'none';
+        return;
+    }
+    bar.style.display = '';
+    bar.classList.toggle('disabled', state !== 'active');
+    const previewing = previewTime != null && Number.isFinite(previewTime);
+    const position = previewing ? Logic.seekPosition(previewTime, info) : info.position;
+    const currentText = previewing
+        ? Logic.formatTime(info.live ? previewTime : previewTime - info.start)
+        : info.currentText;
+    const percent = `${(position * 100).toFixed(3)}%`;
+    const fill = bar.querySelector('.progress-fill');
+    if (fill) fill.style.width = percent;
+    const thumb = bar.querySelector('.seek-thumb');
+    if (thumb) thumb.style.left = percent;
+    const current = bar.querySelector('.seek-current');
+    if (current) current.textContent = currentText;
+    const total = bar.querySelector('.seek-total');
+    if (total) total.textContent = info.totalText;
+    bar.setAttribute('aria-valuemin', String(Math.floor(info.start)));
+    bar.setAttribute('aria-valuemax', String(Math.floor(info.end)));
+    bar.setAttribute('aria-valuenow', String(Math.floor(previewing ? previewTime : info.start + position * (info.end - info.start))));
+    bar.setAttribute('aria-valuetext', `${currentText} / ${info.totalText}`);
+    bar.setAttribute('aria-disabled', state === 'active' ? 'false' : 'true');
+}
+
+function seekMedia(media, time) {
+    if (!media || time == null || !Number.isFinite(time)) return;
+    try {
+        media.currentTime = time;
+    } catch { /* not seekable (yet) */ }
+}
+
+// The bar owns its pointer from down to up: it is a sibling above the
+// play/pause layer (so no tap/double-tap like reaches it), touch-action is
+// none (so a drag on it never scrolls the feed to the next card), and the
+// pointer is captured so a drag that leaves the bar keeps seeking. The seek
+// itself happens on release, so a drag over a relayed video opens one new
+// range request instead of one per move.
+function bindSeekbar(card) {
+    const bar = card.querySelector('.video-seek');
+    const track = bar && bar.querySelector('.seek-track');
+    const media = card.querySelector('video');
+    if (!bar || !track || !media) return;
+    let drag = null;
+
+    const refresh = () => {
+        if (!drag) renderSeek(card, mediaTiming(media));
     };
-    media.addEventListener('timeupdate', update);
+    ['timeupdate', 'durationchange', 'loadedmetadata', 'seeked', 'emptied', 'error'].forEach((type) => {
+        media.addEventListener(type, refresh);
+    });
+
+    const timeAt = (event, info) => {
+        const rect = track.getBoundingClientRect();
+        return Logic.seekTarget(Logic.seekRatio(event.clientX, rect.left, rect.width), info);
+    };
+
+    const endDrag = (event, commit) => {
+        if (!drag || event.pointerId !== drag.pointerId) return;
+        event.stopPropagation();
+        const { time } = drag;
+        drag = null;
+        try { bar.releasePointerCapture(event.pointerId); } catch { /* already released */ }
+        bar.classList.remove('dragging');
+        card.classList.remove('seeking');
+        lastTapTime = 0;
+        if (commit) seekMedia(media, Logic.clampSeekTime(time, mediaTiming(media)));
+        renderSeek(card, mediaTiming(media));
+    };
+
+    bar.addEventListener('pointerdown', (event) => {
+        event.stopPropagation();
+        // A tap on the bar never counts toward a double-tap like.
+        lastTapTime = 0;
+        if (typeof event.button === 'number' && event.button > 0) return;
+        const info = mediaTiming(media);
+        if (!info.canSeek) return;
+        event.preventDefault();
+        drag = { pointerId: event.pointerId, info, time: timeAt(event, info) };
+        try { bar.setPointerCapture(event.pointerId); } catch { /* still works without capture */ }
+        bar.classList.add('dragging');
+        card.classList.add('seeking');
+        renderSeek(card, info, drag.time);
+    });
+    bar.addEventListener('pointermove', (event) => {
+        if (!drag || event.pointerId !== drag.pointerId) return;
+        event.stopPropagation();
+        event.preventDefault();
+        drag.time = timeAt(event, drag.info);
+        renderSeek(card, drag.info, drag.time);
+    });
+    bar.addEventListener('pointerup', (event) => endDrag(event, true));
+    bar.addEventListener('pointercancel', (event) => endDrag(event, false));
+    bar.addEventListener('lostpointercapture', (event) => endDrag(event, false));
+    // Older touch stacks without touch-action: keep the gesture off the feed.
+    ['touchstart', 'touchmove', 'touchend'].forEach((type) => {
+        bar.addEventListener(type, (event) => {
+            if (bar.classList.contains('disabled')) return;
+            event.stopPropagation();
+            if (type === 'touchmove' && event.cancelable) event.preventDefault();
+        }, { passive: type !== 'touchmove' });
+    });
+    ['click', 'dblclick'].forEach((type) => {
+        bar.addEventListener(type, (event) => event.stopPropagation());
+    });
+}
+
+// ←/→ on a computer: ±SEEK_STEP seconds on the card on screen.
+function seekCurrentBy(delta) {
+    const card = cardAt(currentVideoIndex);
+    if (!card || card.querySelector('iframe.embed-player')) return false;
+    const media = card.querySelector('video');
+    const info = mediaTiming(media);
+    const target = Logic.seekBy(info, media && media.currentTime, delta);
+    if (target == null) return false;
+    seekMedia(media, target);
+    return true;
 }
 
 function sourceOf(video) {
@@ -805,8 +948,9 @@ function mountEmbed(card, embedUrl) {
         });
         card.appendChild(exit);
     }
-    const progress = card.querySelector('.video-progress');
-    if (progress) progress.style.display = 'none';
+    // The iframe player cannot be seeked from here: no seek bar on embeds.
+    const seek = card.querySelector('.video-seek');
+    if (seek) seek.style.display = 'none';
 }
 
 function prepareVideo(media) {
@@ -868,7 +1012,6 @@ function mountFile(card, index, url) {
     const started = waitUntilPlaying(media);
     const playPromise = media.play();
     if (playPromise) playPromise.catch(() => {});
-    startProgressTracking(media, index);
     return started;
 }
 
@@ -926,7 +1069,6 @@ function mountHls(card, index, url) {
             media.muted = isMuted;
             media.play().then(() => {
                 showPlayIcon(index, false, false);
-                startProgressTracking(media, index);
             }).catch(() => showPlayIcon(index, true, true));
         });
         hls.loadSource(url);
@@ -1413,6 +1555,8 @@ document.addEventListener('keydown', (event) => {
         event.preventDefault();
         const prev = cardAt(currentVideoIndex - 1);
         if (prev) prev.scrollIntoView({ behavior: 'smooth' });
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        if (seekCurrentBy(event.key === 'ArrowLeft' ? -Logic.SEEK_STEP : Logic.SEEK_STEP)) event.preventDefault();
     } else if (event.key === ' ') {
         event.preventDefault();
         togglePlayPause(currentVideoIndex);
@@ -1438,7 +1582,7 @@ async function init() {
             localStorage.removeItem(STORAGE_SOURCE);
         }
         // A source hidden in config/sources.json is not offered, even if it
-        // was the last one this browser used. With nothing saved: TwiKeep.
+        // was the last one this browser used. With nothing saved: Pornhub.
         selectSource(Logic.initialSource(visibleSources(), saved), false);
         renderSourceBar();
         renderPeriodBar();

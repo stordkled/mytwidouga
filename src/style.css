@@ -382,7 +382,7 @@ body {
 .side-actions {
     position: absolute;
     right: 12px;
-    bottom: calc(var(--nav-height) + var(--safe-bottom) + 40px);
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 52px);
     z-index: 10;
     display: flex;
     flex-direction: column;
@@ -467,7 +467,8 @@ body {
    ============================================ */
 .video-info {
     position: absolute;
-    bottom: calc(var(--nav-height) + var(--safe-bottom) + 16px);
+    /* Clear of the seek bar's time label below. */
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 34px);
     left: 16px;
     right: 80px;
     z-index: 10;
@@ -506,25 +507,105 @@ body {
 }
 
 /* ============================================
-   Progress Bar
+   Seek Bar (progress + drag/tap to seek)
+   The whole strip is the touch target; the visible track is thin.
+   touch-action: none keeps a drag here from scrolling the feed.
    ============================================ */
-.video-progress {
+.video-seek {
     position: absolute;
     bottom: calc(var(--nav-height) + var(--safe-bottom));
     left: 0;
     right: 0;
-    height: 3px;
-    background: rgba(255, 255, 255, 0.15);
+    height: 30px;
     z-index: 12;
-    overflow: hidden;
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
 }
 
-.video-progress .progress-fill {
+.video-seek.disabled {
+    cursor: default;
+    pointer-events: none;
+}
+
+.seek-time {
+    position: absolute;
+    left: 12px;
+    bottom: 9px;
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+    pointer-events: none;
+}
+
+.video-seek.disabled .seek-time {
+    opacity: 0.6;
+}
+
+.video-seek.dragging .seek-time {
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.seek-track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.18);
+    transition: height 0.15s ease;
+}
+
+.video-seek:not(.disabled):hover .seek-track,
+.video-seek.dragging .seek-track {
+    height: 6px;
+}
+
+.seek-track .progress-fill {
     height: 100%;
     background: var(--accent-gradient);
     width: 0%;
     transition: width 0.1s linear;
     border-radius: 0 2px 2px 0;
+}
+
+.video-seek.dragging .progress-fill {
+    transition: none;
+}
+
+.seek-thumb {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 6px rgba(0, 0, 0, 0.5);
+    transform: translate(-50%, -50%) scale(0);
+    transition: transform 0.15s ease;
+    pointer-events: none;
+}
+
+.video-seek:not(.disabled):hover .seek-thumb,
+.video-seek.dragging .seek-thumb {
+    transform: translate(-50%, -50%) scale(1);
+}
+
+@media (hover: none) {
+    .video-seek:not(.disabled) .seek-thumb {
+        transform: translate(-50%, -50%) scale(0.75);
+    }
+
+    .video-seek.dragging .seek-thumb {
+        transform: translate(-50%, -50%) scale(1.15);
+    }
 }
 
 /* ============================================
@@ -640,7 +721,7 @@ body {
    ============================================ */
 .scroll-indicator {
     position: absolute;
-    bottom: calc(var(--nav-height) + var(--safe-bottom) + 24px);
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 40px);
     left: 50%;
     transform: translateX(-50%);
     z-index: 15;
@@ -745,12 +826,6 @@ body {
 
     .bottom-nav {
         border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-    }
-
-    .video-progress {
-        max-width: 420px;
-        left: 50%;
-        transform: translateX(-50%);
     }
 }
 

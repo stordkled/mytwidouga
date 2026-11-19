@@ -190,30 +190,30 @@ test('server.js passes ?metric= to the ranking', () => {
 
 // ---- 4b / 6. Client decisions (src/feed-logic.js) -------------------------
 
-// Same order as the registry: hidden twivideo, then TwiKeep, 85po, ...
+// Same order as the registry: Pornhub, 85po, hidden twivideo, TwiKeep, ...
 const SOURCES = [
+    { id: 'pornhub', name: 'Pornhub', hidden: false },
+    { id: '85po', name: '85po', hidden: false },
     { id: 'twivideo', name: 'TWIVIDEO', hidden: true },
     { id: 'twikeep', name: 'TwiKeep', hidden: false },
-    { id: '85po', name: '85po', hidden: false },
-    { id: 'pornhub', name: 'Pornhub', hidden: false },
     { id: 'tokyomotion', name: 'TokyoMotion', hidden: false },
 ];
 
 test('automatic source switching skips hidden and already-failed sources and stops when none is left', () => {
-    const failed = new Set(['twikeep']);
-    assert.equal(Logic.fallbackSource(SOURCES, 'twikeep', failed).id, '85po', 'switches in switcher order');
+    const failed = new Set(['pornhub']);
+    assert.equal(Logic.fallbackSource(SOURCES, 'pornhub', failed).id, '85po', 'switches in switcher order');
     failed.add('85po');
-    assert.equal(Logic.fallbackSource(SOURCES, '85po', failed).id, 'pornhub');
-    failed.add('pornhub');
-    assert.equal(Logic.fallbackSource(SOURCES, 'pornhub', failed).id, 'tokyomotion');
+    assert.equal(Logic.fallbackSource(SOURCES, '85po', failed).id, 'twikeep', 'the hidden twivideo is skipped');
+    failed.add('twikeep');
+    assert.equal(Logic.fallbackSource(SOURCES, 'twikeep', failed).id, 'tokyomotion');
     failed.add('tokyomotion');
     assert.equal(Logic.fallbackSource(SOURCES, 'tokyomotion', failed), null, 'never a hidden one, never a failed one');
 
     const allHidden = SOURCES.map((source) => ({ ...source, hidden: true }));
     assert.equal(Logic.fallbackSource(allHidden, 'pornhub', new Set()), null);
     assert.equal(Logic.barSources(allHidden, 'pornhub').length, 5, 'the bar still lets the user pick one by hand');
-    assert.deepEqual(Logic.barSources(SOURCES, 'twivideo').map((source) => source.id), ['twivideo', 'twikeep', '85po', 'pornhub', 'tokyomotion']);
-    assert.deepEqual(Logic.barSources(SOURCES, 'twikeep').map((source) => source.id), ['twikeep', '85po', 'pornhub', 'tokyomotion']);
+    assert.deepEqual(Logic.barSources(SOURCES, 'twivideo').map((source) => source.id), ['pornhub', '85po', 'twivideo', 'twikeep', 'tokyomotion']);
+    assert.deepEqual(Logic.barSources(SOURCES, 'pornhub').map((source) => source.id), ['pornhub', '85po', 'twikeep', 'tokyomotion']);
 });
 
 test('every source hidden: the bar offers all of them, whichever one is current', () => {
@@ -222,27 +222,36 @@ test('every source hidden: the bar offers all of them, whichever one is current'
         assert.deepEqual(Logic.barSources(allHidden, current).map((source) => source.id), SOURCES.map((source) => source.id));
     }
     const onlyCurrentShown = SOURCES.map((source) => ({ ...source, hidden: source.id !== 'twikeep' }));
-    assert.deepEqual(Logic.barSources(onlyCurrentShown, 'pornhub').map((source) => source.id), ['twikeep', 'pornhub']);
+    assert.deepEqual(Logic.barSources(onlyCurrentShown, 'pornhub').map((source) => source.id), ['pornhub', 'twikeep']);
 });
 
-test('a browser with no saved source, or a removed/hidden one, opens on TwiKeep', () => {
+test('a browser with no saved source, or a removed/hidden one, opens on Pornhub', () => {
     const offered = Logic.barSources(SOURCES, undefined);
-    assert.equal(Logic.DEFAULT_SOURCE_ID, 'twikeep');
-    assert.equal(Logic.initialSource(offered, null).id, 'twikeep', 'empty localStorage');
-    assert.equal(Logic.initialSource(offered, 'removed-source').id, 'twikeep', 'a source the server no longer has');
-    assert.equal(Logic.initialSource(offered, 'twivideo').id, 'twikeep', 'a config-hidden source');
-    assert.equal(Logic.initialSource(offered, 'pornhub').id, 'pornhub', 'a saved, offered source is kept');
-    const twikeepDown = Logic.barSources(SOURCES.map((source) => (
-        source.id === 'twikeep' ? { ...source, hidden: true } : source
+    assert.equal(Logic.DEFAULT_SOURCE_ID, 'pornhub');
+    assert.equal(Logic.initialSource(offered, null).id, 'pornhub', 'empty localStorage');
+    assert.equal(Logic.initialSource(offered, undefined).id, 'pornhub');
+    assert.equal(Logic.initialSource(offered, '').id, 'pornhub');
+    assert.equal(Logic.initialSource(offered, 'removed-source').id, 'pornhub', 'a source the server no longer has');
+    assert.equal(Logic.initialSource(offered, 'missav').id, 'pornhub', 'the removed MissAV');
+    assert.equal(Logic.initialSource(offered, 'twivideo').id, 'pornhub', 'a config-hidden source');
+    assert.equal(Logic.initialSource(offered, 'twikeep').id, 'twikeep', 'a saved, offered source is kept');
+    assert.equal(Logic.initialSource(offered, '85po').id, '85po');
+    const pornhubDown = Logic.barSources(SOURCES.map((source) => (
+        source.id === 'pornhub' ? { ...source, hidden: true } : source
     )), undefined);
-    assert.equal(Logic.initialSource(twikeepDown, null).id, '85po', 'next in order while TwiKeep is hidden');
+    assert.equal(Logic.initialSource(pornhubDown, null).id, '85po', 'next in order while Pornhub is hidden');
+    // Even if a list arrives in another order, the default is still Pornhub.
+    const shuffled = [SOURCES[3], SOURCES[1], SOURCES[0]];
+    assert.equal(Logic.initialSource(shuffled, null).id, 'pornhub');
     assert.equal(Logic.initialSource([], null), null);
+    assert.equal(Logic.initialSource(null, null), null);
 
-    // The registry's first offered source is TwiKeep too.
+    // The registry's first offered source is Pornhub too, then 85po.
     sources.resetFailures();
     const offeredByServer = Logic.barSources(sources.list(), undefined);
-    assert.equal(offeredByServer[0].id, 'twikeep');
+    assert.equal(offeredByServer[0].id, 'pornhub');
     assert.equal(offeredByServer[1].id, '85po');
+    assert.equal(Logic.initialSource(offeredByServer, null).id, 'pornhub');
 
     const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
     assert.match(main, /selectSource\(Logic\.initialSource\(visibleSources\(\), saved\), false\)/);
