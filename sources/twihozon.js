@@ -2,6 +2,7 @@ const { loadHtml, cleanText, absUrl } = require('../lib/html');
 const { getText, responseFailure, probeMedia } = require('../lib/http');
 const { withMirror, activeBase } = require('../lib/mirrors');
 const { bestVideo, allVideos, sortVideos, firstThumb, videoUrl } = require('../lib/twimg');
+const { parseCount } = require('../src/feed-logic');
 
 // Twihozon is plain server-rendered HTML. Each ranking card links to
 // /play-<id>-video.html and carries the pbs.twimg.com thumbnail and the
@@ -71,13 +72,17 @@ function rawSlice(html, id, order) {
     return html.slice(start, end > start ? end : start + 4000);
 }
 
-function numberText(value) {
-    const match = String(value || '').match(/\d[\d,]*/);
-    return match ? match[0].replace(/,/g, '') : '';
+// "12,345" "1.2K" "1万" -> 12345 / 1200 / 10000, else null (parseCount).
+function countOf(value) {
+    return value ? parseCount(value) : null;
 }
 
-const VIEWS_ONLY = /^([\d,]+)\s*件の表示$/;
-const VIEWS_IN = /(?<![\d,])([\d,]+)\s*件の表示/;
+// A count as the boards print it: digits with commas, an optional decimal
+// part and an optional unit ("12,345", "1.2K", "1.5万").
+const COUNT = String.raw`\d[\d,]*(?:\.\d+)?(?:[千万萬億]|[KkMmBb](?![A-Za-z]))?`;
+const VIEWS_ONLY = new RegExp(`^(${COUNT})\\s*件の表示$`);
+const VIEWS_IN = new RegExp(`(?<![\\d,.])(${COUNT})\\s*件の表示`);
+const SAVES_AFTER = new RegExp(`^\\s*(${COUNT})(?=\\s|$)`);
 const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT']);
 
 // Text of every text node in document order, one segment per node. The live
@@ -107,11 +112,12 @@ function parseCard(card) {
     const element = viewsElement(card);
     const dedicated = element ? cleanText(element.text).match(VIEWS_ONLY) : null;
     const viewMatch = segmented.match(VIEWS_IN);
-    const views = numberText(dedicated ? dedicated[1] : viewMatch?.[1]);
+    const views = countOf(dedicated ? dedicated[1] : viewMatch?.[1]);
     // The save count follows the view count (an icon, then the number) and
     // must be a segment of its own (so a following date is not read as one).
+    // Unit forms ("1.2K", "1万") are kept so the weighted shuffle sees them.
     const after = viewMatch ? segmented.slice(viewMatch.index + viewMatch[0].length) : '';
-    const saves = viewMatch ? numberText(after.match(/^\s*([\d,]+)(?=\s|$)/)?.[1]) : '';
+    const saves = viewMatch ? countOf(after.match(SAVES_AFTER)?.[1]) : null;
     const title = cleanTitle(viewMatch ? segmented.slice(0, viewMatch.index) : segmented);
     return { views, saves, title };
 }
@@ -220,9 +226,13 @@ function parseListing(html, base = ORIGIN) {
             title: title || fallback,
             author,
             views: [
-                views ? `${Number(views).toLocaleString('ja-JP')} 回表示` : '',
-                saves ? `${Number(saves).toLocaleString('ja-JP')} 保存` : '',
+                views != null ? `${views.toLocaleString('ja-JP')} 回表示` : '',
+                saves != null ? `${saves.toLocaleString('ja-JP')} 保存` : '',
             ].filter(Boolean).join(' · '),
+            stats: {
+                saves: saves != null ? saves : undefined,
+                views: views != null ? views : undefined,
+            },
             pageUrl: page,
             externalUrl: page,
             thumbUrl: thumb,

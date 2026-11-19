@@ -1,6 +1,8 @@
 const { TtlCache, withTimeout } = require('../lib/cache');
 const { resolvePeriod } = require('../lib/periods');
-const { finalizeVideos } = require('../lib/video');
+const {
+    finalizeVideos, pageRanking, PAGE_SIZE, RANKING_MAX,
+} = require('../lib/video');
 const mirrors = require('../lib/mirrors');
 const { withAutoplay } = require('../lib/playback');
 
@@ -234,7 +236,9 @@ async function fetchRanking(sourceId, requestedPeriod, options = {}) {
                 timeout,
                 adapter.name
             );
-            const finalized = finalizeVideos(withEmbeds(adapter, videos));
+            // The whole board is kept (up to RANKING_MAX); /api/videos hands
+            // it out PAGE_SIZE at a time for the feed's infinite scroll.
+            const finalized = finalizeVideos(withEmbeds(adapter, videos), RANKING_MAX);
             if (finalized.length === 0) {
                 throw new Error(`${adapter.name} returned an empty ranking`);
             }
@@ -362,6 +366,9 @@ module.exports = {
     domainStatus,
     playbackConfig,
     fetchRanking,
+    pageRanking,
+    PAGE_SIZE,
+    RANKING_MAX,
     resolvePlayback,
     lookupExternal,
     rankingCacheKey,

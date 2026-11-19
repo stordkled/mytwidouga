@@ -5,10 +5,21 @@
     if (typeof module === 'object' && module.exports) module.exports = api;
     else root.FeedLogic = api;
 }(typeof self !== 'undefined' ? self : this, () => {
-    function videosUrl(sourceId, period, metric) {
+    // `page` (2, 3, ...) asks for the next page of the same board.
+    function videosUrl(sourceId, period, metric, page) {
         let url = `/api/videos?source=${encodeURIComponent(sourceId)}&period=${encodeURIComponent(period || '')}`;
         if (metric) url += `&metric=${encodeURIComponent(metric)}`;
+        if (Number.isInteger(page) && page > 1) url += `&page=${page}`;
         return url;
+    }
+
+    // Infinite scroll: fetch the next page once the viewer is this close to
+    // the end of the feed, unless one is already on its way.
+    const LOAD_MORE_AHEAD = 3;
+
+    function shouldLoadMore({ index, total, hasMore, loading }) {
+        if (!hasMore || loading) return false;
+        return index >= total - LOAD_MORE_AHEAD;
     }
 
     // The source id is the video's own, never "whatever is selected now":
@@ -311,7 +322,175 @@
         }));
     }
 
+    // ---- Feed order (ランダム / ランキング順) ----------------------------------
+    // "random" (default) plays each ranking in a weighted random order, so a
+    // popular video tends to come early but a low one still shows up now and
+    // then. "ranking" keeps the board's own order. The いいね一覧 never goes
+    // through here; it stays newest first.
+    const FEED_ORDERS = ['random', 'ranking'];
+    const DEFAULT_FEED_ORDER = 'random';
+
+    function pickFeedOrder(saved) {
+        return FEED_ORDERS.includes(saved) ? saved : DEFAULT_FEED_ORDER;
+    }
+
+    function nextFeedOrder(current) {
+        return pickFeedOrder(current) === 'random' ? 'ranking' : 'random';
+    }
+
+    const UNITS = {
+        k: 1e3, m: 1e6, b: 1e9, '千': 1e3, '万': 1e4, '萬': 1e4, '億': 1e8,
+    };
+
+    // "1.2K" "12,345" "1万" "1.5万回" "3.4M views" -> a number, else null.
+    function parseCount(value) {
+        if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
+        if (value == null) return null;
+        let text = String(value);
+        if (typeof text.normalize === 'function') text = text.normalize('NFKC');
+        const match = text.match(/(\d[\d,]*(?:\.\d+)?)\s*(?:([千万萬億])|([kmb])(?![a-z]))?/i);
+        if (!match) return null;
+        const number = Number(match[1].replace(/,/g, ''));
+        if (!Number.isFinite(number)) return null;
+        const unit = (match[2] || match[3] || '').toLowerCase();
+        return Math.round(number * (UNITS[unit] || 1));
+    }
+
+    const POPULARITY_KEYS = ['saves', 'likes', 'views'];
+
+    // What a label counts: お気に入り/保存 > いいね > 表示/再生.
+    function countKind(label) {
+        if (/保存|お気に入り|ダウンロード|fav|save|download|bookmark/i.test(label)) return 'saves';
+        if (/いいね|like|♥|❤/i.test(label)) return 'likes';
+        return 'views';
+    }
+
+    // { saves, likes, views } (each a number or null) from the structured
+    // `stats` the server sends, else from the display text in `views`
+    // (e.g. "1,234 保存", "123 回表示 · 45 保存", "1.2K views").
+    function popularityOf(video) {
+        const out = { saves: null, likes: null, views: null };
+        if (!video || typeof video !== 'object') return out;
+        const stats = video.stats && typeof video.stats === 'object' ? video.stats : {};
+        POPULARITY_KEYS.forEach((key) => {
+            const count = parseCount(stats[key]);
+            if (count != null) out[key] = count;
+        });
+        if (typeof video.views === 'string' && video.views) {
+            video.views.split(/[·・|/]/).forEach((part) => {
+                const count = parseCount(part);
+                if (count == null) return;
+                const kind = countKind(part);
+                if (out[kind] == null) out[kind] = count;
+            });
+        } else if (typeof video.views === 'number' && out.views == null) {
+            out.views = parseCount(video.views);
+        }
+        return out;
+    }
+
+    // Every video keeps at least this share of the top weight, so the
+    // bottom of a board still turns up now and then.
+    const MIN_WEIGHT = 0.2;
+
+    function rankOf(video, index) {
+        const rank = video && Number(video.rank);
+        return Number.isFinite(rank) && rank >= 1 ? rank : index + 1;
+    }
+
+    // One weight per video, in (MIN_WEIGHT, 1]. The list uses the best
+    // signal any of its videos has (saves > likes > views); a video without
+    // that number gets the floor. Counts are log-compressed so a 100x lead
+    // does not mean "always first". With no numbers at all the board rank
+    // is used (No.1 heaviest).
+    function feedWeights(list) {
+        const items = Array.isArray(list) ? list : [];
+        if (items.length === 0) return [];
+        const stats = items.map(popularityOf);
+        const key = POPULARITY_KEYS.find((name) => stats.some((entry) => entry[name] != null));
+        if (key) {
+            const counts = stats.map((entry) => entry[key] || 0);
+            const top = Math.log1p(Math.max(...counts));
+            if (top > 0) {
+                return counts.map((count) => MIN_WEIGHT + (1 - MIN_WEIGHT) * (Math.log1p(count) / top));
+            }
+        }
+        const ranks = items.map(rankOf);
+        const size = Math.max(items.length, ...ranks);
+        const span = Math.log(size + 1);
+        return ranks.map((rank) => {
+            const clamped = Math.min(Math.max(rank, 1), size);
+            return MIN_WEIGHT + (1 - MIN_WEIGHT) * (Math.log((size + 1) / clamped) / span);
+        });
+    }
+
+    // Efraimidis–Spirakis: key = u^(1/w), largest first. Compared as
+    // ln(u)/w (same order, no underflow). `rng` returns [0, 1).
+    function weightedShuffle(items, weights, rng) {
+        const random = typeof rng === 'function' ? rng : Math.random;
+        const list = Array.isArray(items) ? items : [];
+        const keyed = list.map((item, index) => {
+            const raw = weights && Number(weights[index]);
+            const weight = Number.isFinite(raw) && raw > 0 ? raw : MIN_WEIGHT;
+            let u = Number(random());
+            if (!(u > 0)) u = Number.MIN_VALUE;
+            if (u >= 1) u = 1 - Number.EPSILON;
+            return { item, index, key: Math.log(u) / weight };
+        });
+        keyed.sort((a, b) => (b.key - a.key) || (a.index - b.index));
+        return keyed.map((entry) => entry.item);
+    }
+
+    function feedKey(video) {
+        return bookmarkKey((video && video._sourceId) || '', String(video && video.id));
+    }
+
+    // Drop malformed rows, repeats, and anything in `exclude` (keys from
+    // feedKey). Keeps the board order.
+    function uniqueVideos(list, exclude) {
+        const seen = new Set(exclude || []);
+        const out = [];
+        (Array.isArray(list) ? list : []).forEach((video) => {
+            if (!video || video.id == null || video.id === '') return;
+            const key = feedKey(video);
+            if (seen.has(key)) return;
+            seen.add(key);
+            out.push(video);
+        });
+        return out;
+    }
+
+    // A ranking list as the feed plays it: no repeats, then either the board
+    // order or a fresh weighted shuffle.
+    function orderFeed(list, order, options = {}) {
+        const unique = uniqueVideos(list, options.exclude);
+        if (pickFeedOrder(order) === 'ranking') return unique;
+        return weightedShuffle(unique, feedWeights(unique), options.rng);
+    }
+
+    // Infinite scroll: the next page is ordered the same way and appended;
+    // a video already in the feed is not added again.
+    function appendFeed(existing, page, order, options = {}) {
+        const current = Array.isArray(existing) ? existing : [];
+        const exclude = new Set(current.map(feedKey));
+        return current.concat(orderFeed(page, order, { ...options, exclude }));
+    }
+
     return {
+        FEED_ORDERS,
+        DEFAULT_FEED_ORDER,
+        pickFeedOrder,
+        nextFeedOrder,
+        parseCount,
+        popularityOf,
+        MIN_WEIGHT,
+        feedWeights,
+        weightedShuffle,
+        uniqueVideos,
+        orderFeed,
+        appendFeed,
+        LOAD_MORE_AHEAD,
+        shouldLoadMore,
         BOOKMARK_LIMIT,
         bookmarkFromVideo,
         normalizeBookmarks,

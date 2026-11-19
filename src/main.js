@@ -13,6 +13,7 @@ const STORAGE_SOURCE = 'shorts.source';
 const STORAGE_PERIOD = 'shorts.period.';
 const STORAGE_METRIC = 'shorts.metric.';
 const STORAGE_BOOKMARKS = 'shorts.bookmarks';
+const STORAGE_ORDER = 'shorts.order';
 const Logic = window.FeedLogic;
 
 // localStorage itself can throw (storage disabled, private mode).
@@ -23,6 +24,36 @@ function bookmarkStorage() {
         return null;
     }
 }
+
+function readSetting(key) {
+    try {
+        const storage = bookmarkStorage();
+        return storage ? storage.getItem(key) : null;
+    } catch {
+        return null;
+    }
+}
+
+function writeSetting(key, value) {
+    try {
+        const storage = bookmarkStorage();
+        if (storage) storage.setItem(key, value);
+    } catch { /* kept for this page only */ }
+}
+
+// 'random' (weighted by saves/likes/views, default) or 'ranking'.
+let feedOrder = Logic.pickFeedOrder(readSetting(STORAGE_ORDER));
+// The ranking as the server sent it (board order), so the order toggle can
+// re-sort without a new request. The feed itself (`videos`) is ordered.
+let rankingVideos = [];
+// Infinite scroll: the last /api/videos page in the feed, whether the board
+// has more, and the request for the next one. `feedGeneration` changes on
+// every new feed (load, source/period/metric switch, いいね一覧), so a late
+// page for an old feed is dropped.
+let rankingPage = 0;
+let rankingHasMore = false;
+let moreController = null;
+let feedGeneration = 0;
 
 // Liked videos (newest first), kept in memory and mirrored to localStorage.
 let bookmarks = Logic.loadBookmarks(bookmarkStorage(), STORAGE_BOOKMARKS);
@@ -257,10 +288,75 @@ function likeVideo(index, forceLike) {
     setLikeButton(card && card.querySelector('.like-btn'), Logic.isBookmarked(bookmarks, sourceId, video.id));
 }
 
+function stopMoreLoad() {
+    feedGeneration += 1;
+    if (moreController) moreController.abort();
+    moreController = null;
+}
+
 function stopRankingLoad() {
     if (loadController) loadController.abort();
     loadController = null;
     isLoading = false;
+    stopMoreLoad();
+    rankingHasMore = false;
+}
+
+function maybeLoadMore(index) {
+    if (bookmarkMode || isLoading) return;
+    if (!Logic.shouldLoadMore({ index, total: videos.length, hasMore: rankingHasMore, loading: Boolean(moreController) })) return;
+    loadMoreVideos();
+}
+
+// The next page of the same board, ordered like the first one (weighted
+// shuffle or board order) and appended below; videos already in the feed
+// are skipped (Logic.appendFeed). Cards on screen are left as they are.
+async function loadMoreVideos() {
+    if (!currentSource || bookmarkMode) return;
+    const generation = feedGeneration;
+    const source = currentSource;
+    const page = rankingPage + 1;
+    const controller = new AbortController();
+    moreController = controller;
+    let nothingNew = false;
+    try {
+        const response = await fetch(Logic.videosUrl(source.id, currentPeriod, currentMetric, page), { signal: controller.signal });
+        const data = await response.json();
+        if (generation !== feedGeneration || bookmarkMode) return;
+        if (!data.ok) {
+            rankingHasMore = false;
+            return;
+        }
+        const pageVideos = (data.videos || []).map((video) => ({ ...video, _sourceId: source.id }));
+        rankingPage = page;
+        rankingHasMore = Boolean(data.hasMore) && pageVideos.length > 0;
+        rankingVideos = Logic.uniqueVideos(rankingVideos.concat(pageVideos));
+        const start = videos.length;
+        videos = Logic.appendFeed(videos, pageVideos, feedOrder);
+        appendCards(start);
+        nothingNew = videos.length === start;
+    } catch (err) {
+        // A network error stops the scroll here; a reload starts over.
+        if (err.name !== 'AbortError' && generation === feedGeneration) rankingHasMore = false;
+    } finally {
+        if (moreController === controller) moreController = null;
+    }
+    // A page made only of videos already shown adds no card to scroll to,
+    // so ask for the one after it straight away.
+    if (nothingNew && generation === feedGeneration) maybeLoadMore(currentVideoIndex);
+}
+
+// Add cards for videos[start..] without touching the ones already shown.
+function appendCards(start) {
+    const added = [];
+    for (let index = start; index < videos.length; index += 1) {
+        const card = createVideoCard(videos[index], index);
+        videoFeed.appendChild(card);
+        added.push(card);
+    }
+    if (added.length === 0) return;
+    if (feedObserver) added.forEach((card) => feedObserver.observe(card));
+    setupEventListeners(added);
 }
 
 async function openBookmarks() {
@@ -369,6 +465,37 @@ function renderPeriodBar() {
         });
         bottomNav.appendChild(button);
     }
+    bottomNav.appendChild(orderButton());
+}
+
+// ランダム ⇄ ランキング順. Saved per browser; the いいね一覧 is not affected.
+function orderButton() {
+    const random = feedOrder === 'random';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'nav-btn order-btn' + (random ? ' active' : '');
+    button.title = random ? 'ランダム順（人気ほど出やすい）→ ランキング順に切り替え' : 'ランキング順 → ランダム順に切り替え';
+    button.setAttribute('aria-pressed', random ? 'true' : 'false');
+    button.innerHTML = `<i class="fas ${random ? 'fa-shuffle' : 'fa-list-ol'}"></i><span></span>`;
+    button.querySelector('span').textContent = random ? 'ランダム' : 'ランキング順';
+    button.addEventListener('click', () => {
+        feedOrder = Logic.nextFeedOrder(feedOrder);
+        writeSetting(STORAGE_ORDER, feedOrder);
+        renderPeriodBar();
+        applyFeedOrder();
+    });
+    return button;
+}
+
+// Re-order the loaded ranking in place (a fresh shuffle each time). While a
+// load is running, that load applies the new order when it renders.
+function applyFeedOrder() {
+    if (bookmarkMode || isLoading || rankingVideos.length === 0) return;
+    const fresh = rankingVideos.map(({ _preloading, _preloaded, ...video }) => video);
+    videos = Logic.orderFeed(fresh, feedOrder);
+    renderVideos(videos);
+    currentVideoIndex = 0;
+    videoFeed.scrollTo({ top: 0 });
 }
 
 function showMessage(title, message, onRetry, options = {}) {
@@ -992,6 +1119,7 @@ function setupObserver() {
             const index = Number(entry.target.dataset.index);
             if (entry.isIntersecting && entry.intersectionRatio >= 0.6) {
                 playCard(index);
+                maybeLoadMore(index);
             } else if (index !== currentVideoIndex) {
                 stopCard(entry.target);
             }
@@ -1074,8 +1202,12 @@ function bindEmbedShield(overlay) {
     }, { passive: false });
 }
 
-function setupEventListeners() {
-    videoFeed.querySelectorAll('.play-pause-overlay').forEach((overlay) => {
+// `cards`: only these (cards appended by the infinite scroll); default all.
+function setupEventListeners(cards) {
+    const scope = cards || [...videoFeed.querySelectorAll('.video-card')];
+    const all = (selector) => scope.flatMap((card) => [...card.querySelectorAll(selector)]);
+    const indexOf = (node) => Number(node.closest('.video-card').dataset.index);
+    all('.play-pause-overlay').forEach((overlay) => {
         bindEmbedShield(overlay);
         overlay.addEventListener('click', (event) => {
             const card = overlay.closest('.video-card');
@@ -1102,7 +1234,7 @@ function setupEventListeners() {
         });
     });
 
-    videoFeed.querySelectorAll('.like-btn').forEach((button) => {
+    all('.like-btn').forEach((button) => {
         button.addEventListener('click', (event) => {
             event.stopPropagation();
             const card = button.closest('.video-card');
@@ -1110,7 +1242,7 @@ function setupEventListeners() {
         });
     });
 
-    videoFeed.querySelectorAll('.sound-btn').forEach((button) => {
+    all('.sound-btn').forEach((button) => {
         button.addEventListener('click', (event) => {
             event.stopPropagation();
             isMuted = !isMuted;
@@ -1118,10 +1250,10 @@ function setupEventListeners() {
         });
     });
 
-    videoFeed.querySelectorAll('.share-btn').forEach((button, index) => {
+    all('.share-btn').forEach((button) => {
         button.addEventListener('click', async (event) => {
             event.stopPropagation();
-            const video = videos[index];
+            const video = videos[indexOf(button)];
             const url = (video && (video.externalUrl || video.pageUrl)) || location.href;
             if (navigator.share) {
                 try { await navigator.share({ title: sourceInfo(sourceOf(video)).name, url }); } catch { /* dismissed */ }
@@ -1134,10 +1266,10 @@ function setupEventListeners() {
         });
     });
 
-    videoFeed.querySelectorAll('.origin-btn').forEach((button, index) => {
+    all('.origin-btn').forEach((button) => {
         button.addEventListener('click', async (event) => {
             event.stopPropagation();
-            const video = videos[index];
+            const video = videos[indexOf(button)];
             if (!video) return;
             if (video.lookup) {
                 try {
@@ -1199,6 +1331,10 @@ async function loadVideos(options = {}) {
     // Why the feed is on this source (set when it switched by itself). It
     // stays up with the board's own notes instead of being wiped here.
     const switchNote = options.note || '';
+    rankingVideos = [];
+    stopMoreLoad();
+    rankingPage = 0;
+    rankingHasMore = false;
     isLoading = true;
     stopAll();
     setFallbackNote(switchNote);
@@ -1233,7 +1369,14 @@ async function loadVideos(options = {}) {
             return;
         }
         failedChain.clear();
-        videos = (data.videos || []).map((video) => ({ ...video, _sourceId: source.id }));
+        // Every load (source / period / metric switch, retry, reload) gets a
+        // new random order; the board order is kept for the toggle.
+        rankingVideos = (data.videos || []).map((video) => ({ ...video, _sourceId: source.id }));
+        // Page 1 of the board; the infinite scroll asks for page 2, 3, ...
+        rankingPage = 1;
+        rankingHasMore = Boolean(data.hasMore);
+        let orderUsed = feedOrder;
+        videos = Logic.orderFeed(rankingVideos, orderUsed);
         setFallbackNote(Logic.joinNotes(switchNote, data.fallback ? data.fallbackReason : '', data.notice));
         if (videos.length === 0) {
             showMessage('動画が見つかりませんでした', 'しばらくしてからもう一度お試しください', retryCurrent);
@@ -1243,6 +1386,11 @@ async function loadVideos(options = {}) {
         const sample = videos.find((video) => video.thumbUrl);
         await ensureThumbMode(source.id, sample && sample.thumbUrl);
         if (signal.aborted || source.id !== currentSource.id) return;
+        // The order toggle was flipped while the thumbnails were probed.
+        if (orderUsed !== feedOrder) {
+            orderUsed = feedOrder;
+            videos = Logic.orderFeed(rankingVideos, orderUsed);
+        }
         renderVideos(videos);
         currentVideoIndex = 0;
         videoFeed.scrollTo({ top: 0 });

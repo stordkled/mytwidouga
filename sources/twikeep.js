@@ -1,6 +1,7 @@
 const { getText, responseFailure } = require('../lib/http');
 const { withMirror, sourceConfig } = require('../lib/mirrors');
 const { videoUrl, thumbUrl, tweetUrl } = require('../lib/twimg');
+const { parseCount } = require('../src/feed-logic');
 
 // TwiKeep's /ranking page is a Next.js client page. The HTML has no media,
 // but the page loads the same board from a public JSON endpoint:
@@ -55,9 +56,10 @@ function pageUrl(base, periodId, metric = currentMetric()) {
     return `${base}/ranking?${query}`;
 }
 
-function formatCount(count, metric) {
-    const value = Number(count);
-    if (!Number.isFinite(value) || value < 0) return '';
+// `count` is normally a number, but "12,345", "1.2K" or "1万" are read too
+// (parseCount), so the 保存数 still reaches the weighted shuffle.
+function formatCount(value, metric) {
+    if (value == null) return '';
     return `${value.toLocaleString('ja-JP')} ${METRICS[metric] ? METRICS[metric].label : ''}`.trim();
 }
 
@@ -85,11 +87,18 @@ function parseRanking(body, metric = DEFAULT_METRIC) {
         const userName = /^[A-Za-z0-9_]{1,30}$/.test(String(item.userName || '')) ? item.userName : '';
         const display = typeof item.userDisplayName === 'string' ? item.userDisplayName.trim().slice(0, 80) : '';
         const tweet = tweetUrl(userName, item.tweetId);
+        const count = typeof item.count === 'number' || typeof item.count === 'string'
+            ? parseCount(item.count)
+            : null;
         videos.push({
             id,
             title: display || (userName ? `@${userName}` : ''),
             author: userName ? `@${userName}` : '',
-            views: formatCount(item.count, metric),
+            views: formatCount(count, metric),
+            // downloads = 保存数 (the "favourites" signal), else 表示数.
+            stats: count != null
+                ? { [metric === 'views' ? 'views' : 'saves']: count }
+                : undefined,
             pageUrl: tweet,
             externalUrl: tweet,
             thumbUrl: thumbUrl(item.thumbnailUrl),

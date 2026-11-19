@@ -828,6 +828,16 @@ body {
     color: #fff;
 }
 
+/* Periods + 保存数/表示数 + ランダム/ランキング順 must fit a 360px phone. */
+.bottom-nav .nav-btn {
+    padding: 8px 10px;
+    min-width: 0;
+}
+
+.nav-btn.order-btn span {
+    white-space: nowrap;
+}
+
 .nav-btn.back-to-ranking {
     color: var(--text-primary);
 }

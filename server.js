@@ -100,9 +100,11 @@ async function handle(req, res) {
         const period = url.searchParams.get('period') || url.searchParams.get('sort') || '';
         const metric = (url.searchParams.get('metric') || '').slice(0, 20);
         try {
-            const result = await sources.fetchRanking(sourceId, period, { metric });
+            const board = await sources.fetchRanking(sourceId, period, { metric });
+            // ?page=2,3,... is the infinite scroll's next page of the same board.
+            const result = sources.pageRanking(board, url.searchParams.get('page'));
             const count = result.videos.length;
-            console.log(`[API] ${sourceId} ${result.period && result.period.id}${result.metric ? ` ${result.metric}` : ''} ok=${result.ok} videos=${count}${result.cached ? ' cached' : ''}${result.fallback ? ' fallback' : ''}`);
+            console.log(`[API] ${sourceId} ${result.period && result.period.id}${result.metric ? ` ${result.metric}` : ''} page=${result.page || 1} ok=${result.ok} videos=${count}${result.cached ? ' cached' : ''}${result.fallback ? ' fallback' : ''}`);
             sendJson(res, 200, result);
         } catch (err) {
             sendJson(res, err.status || 500, { ok: false, error: err.message, videos: [] });
