@@ -75,6 +75,8 @@ None of the sites publish a 3-day board. Only TwiKeep has a 1年 board; asking a
 
 The last site and its period are stored in `localStorage`. A browser with nothing saved opens on TwiKeep (the first offered source if TwiKeep is hidden). A saved site that is hidden or no longer exists falls back the same way; one the server no longer has is also cleared from `localStorage`.
 
+**ブクマ（いいね一覧）**: ♥ (or a double tap) saves the video in `localStorage` (`shorts.bookmarks`: source, id, page URL, title, thumbnail, liked time, and the original `playback` object for the usual ladder), newest first, at most 500 (the oldest is dropped; a full or broken storage trims or is ignored instead of crashing). The ブクマ button at the right of the site bar plays them in the same vertical feed; a video that no longer plays is skipped with a note but stays in the list until you tap ♥ again, and the bottom bar returns to the ranking.
+
 ## API
 
 - `GET /api/sources` — id, name, color, periods.

@@ -12,7 +12,22 @@ const periodNote = document.getElementById('periodNote');
 const STORAGE_SOURCE = 'shorts.source';
 const STORAGE_PERIOD = 'shorts.period.';
 const STORAGE_METRIC = 'shorts.metric.';
+const STORAGE_BOOKMARKS = 'shorts.bookmarks';
 const Logic = window.FeedLogic;
+
+// localStorage itself can throw (storage disabled, private mode).
+function bookmarkStorage() {
+    try {
+        return window.localStorage;
+    } catch {
+        return null;
+    }
+}
+
+// Liked videos (newest first), kept in memory and mirrored to localStorage.
+let bookmarks = Logic.loadBookmarks(bookmarkStorage(), STORAGE_BOOKMARKS);
+// True while the feed shows the いいね一覧 instead of a ranking.
+let bookmarkMode = false;
 
 let sources = [];
 let currentSource = null;
@@ -158,13 +173,24 @@ function selectSource(source, remember) {
 function renderSourceBar() {
     sourceBar.replaceChildren();
     visibleSources().forEach((source) => {
+        const active = !bookmarkMode && source.id === currentSource.id;
         const button = document.createElement('button');
         button.type = 'button';
-        button.className = 'source-btn' + (source.id === currentSource.id ? ' active' : '');
+        button.className = 'source-btn' + (active ? ' active' : '');
         button.textContent = source.name;
-        button.style.borderColor = source.id === currentSource.id ? 'transparent' : safeColor(source.color);
-        button.setAttribute('aria-pressed', source.id === currentSource.id ? 'true' : 'false');
+        button.style.borderColor = active ? 'transparent' : safeColor(source.color);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
         button.addEventListener('click', () => {
+            if (bookmarkMode) {
+                // From the いいね一覧 any site button goes back to the rankings.
+                bookmarkMode = false;
+                failedChain.clear();
+                if (source.id !== currentSource.id) selectSource(source, true);
+                renderSourceBar();
+                renderPeriodBar();
+                loadVideos();
+                return;
+            }
             if (source.id === currentSource.id) return;
             failedChain.clear();
             selectSource(source, true);
@@ -174,7 +200,119 @@ function renderSourceBar() {
         });
         sourceBar.appendChild(button);
     });
+    // The いいね一覧 entry sits after the sites (pinned to the right edge by
+    // CSS), so the site order is unchanged.
+    const bookmarkButton = document.createElement('button');
+    bookmarkButton.type = 'button';
+    bookmarkButton.className = 'source-btn bookmark-entry' + (bookmarkMode ? ' active' : '');
+    bookmarkButton.title = 'いいね一覧';
+    bookmarkButton.setAttribute('aria-pressed', bookmarkMode ? 'true' : 'false');
+    bookmarkButton.innerHTML = '<i class="fas fa-heart"></i><span></span>';
+    bookmarkButton.querySelector('span').textContent = `ブクマ ${bookmarks.length}`;
+    bookmarkButton.addEventListener('click', () => {
+        if (bookmarkMode) exitBookmarks();
+        else openBookmarks();
+    });
+    sourceBar.appendChild(bookmarkButton);
 }
+
+function updateBookmarkCount() {
+    const label = sourceBar.querySelector('.bookmark-entry span');
+    if (label) label.textContent = `ブクマ ${bookmarks.length}`;
+}
+
+// Persist the in-memory list. A full or broken localStorage never throws
+// into the UI; the note bar says what happened.
+function persistBookmarks() {
+    const result = Logic.saveBookmarks(bookmarkStorage(), STORAGE_BOOKMARKS, bookmarks);
+    bookmarks = result.saved;
+    if (!result.ok) {
+        setFallbackNote('いいねを保存できませんでした（ブラウザの保存領域を使えません）');
+    } else if (result.trimmed > 0) {
+        setFallbackNote(`保存領域が足りないため古いいいねを ${result.trimmed} 件削除しました`);
+    }
+    updateBookmarkCount();
+}
+
+function setLikeButton(button, liked) {
+    if (!button) return;
+    button.classList.toggle('liked', liked);
+    button.setAttribute('aria-pressed', liked ? 'true' : 'false');
+}
+
+// Like or unlike the video on card `index`; `forceLike` (double tap) only adds.
+function likeVideo(index, forceLike) {
+    const video = videos[index];
+    const card = cardAt(index);
+    if (!video) return;
+    const sourceId = sourceOf(video);
+    const liked = Logic.isBookmarked(bookmarks, sourceId, video.id);
+    if (forceLike && liked) {
+        setLikeButton(card && card.querySelector('.like-btn'), true);
+        return;
+    }
+    const result = Logic.toggleBookmark(bookmarks, video, sourceId, Date.now());
+    bookmarks = result.list;
+    persistBookmarks();
+    setLikeButton(card && card.querySelector('.like-btn'), Logic.isBookmarked(bookmarks, sourceId, video.id));
+}
+
+function stopRankingLoad() {
+    if (loadController) loadController.abort();
+    loadController = null;
+    isLoading = false;
+}
+
+async function openBookmarks() {
+    stopRankingLoad();
+    bookmarkMode = true;
+    // Pick up likes made in another tab.
+    bookmarks = Logic.loadBookmarks(bookmarkStorage(), STORAGE_BOOKMARKS);
+    renderSourceBar();
+    renderPeriodBar();
+    stopAll();
+    setFallbackNote('');
+    videos = Logic.bookmarkVideos(bookmarks);
+    if (videos.length === 0) {
+        setLoading(false);
+        showMessage('まだいいねした動画はありません', 'フィードで ♥ を押すと、ここからあとで見返せます', exitBookmarks, {
+            buttonText: 'ランキングに戻る',
+            icon: 'fa-heart',
+        });
+        return;
+    }
+    const list = videos;
+    setLoading(true, 'いいね一覧を読み込み中...');
+    const samples = new Map();
+    list.forEach((video) => {
+        if (video.thumbUrl && !samples.has(video._sourceId)) samples.set(video._sourceId, video.thumbUrl);
+    });
+    await Promise.all([...samples].map(([sourceId, sample]) => ensureThumbMode(sourceId, sample)));
+    if (!bookmarkMode || videos !== list) return;
+    renderVideos(videos);
+    currentVideoIndex = 0;
+    videoFeed.scrollTo({ top: 0 });
+    setLoading(false);
+}
+
+function exitBookmarks() {
+    if (!bookmarkMode) return;
+    bookmarkMode = false;
+    stopAll();
+    renderSourceBar();
+    renderPeriodBar();
+    loadVideos();
+}
+
+window.addEventListener('storage', (event) => {
+    if (event.key !== STORAGE_BOOKMARKS && event.key !== null) return;
+    bookmarks = Logic.loadBookmarks(bookmarkStorage(), STORAGE_BOOKMARKS);
+    updateBookmarkCount();
+    videoFeed.querySelectorAll('.video-card').forEach((card) => {
+        const video = videos[Number(card.dataset.index)];
+        if (video) setLikeButton(card.querySelector('.like-btn'), Logic.isBookmarked(bookmarks, sourceOf(video), video.id));
+    });
+});
 
 function metricIcon(id) {
     return id === 'views' ? 'fa-eye' : 'fa-download';
@@ -182,6 +320,22 @@ function metricIcon(id) {
 
 function renderPeriodBar() {
     bottomNav.replaceChildren();
+    if (bookmarkMode) {
+        // In the いいね一覧 the bottom bar is the way back to the ranking.
+        const back = document.createElement('button');
+        back.type = 'button';
+        back.className = 'nav-btn back-to-ranking';
+        back.innerHTML = '<i class="fas fa-arrow-left"></i><span></span>';
+        back.querySelector('span').textContent = currentSource ? `${currentSource.name} ランキングに戻る` : 'ランキングに戻る';
+        back.addEventListener('click', exitBookmarks);
+        const label = document.createElement('button');
+        label.type = 'button';
+        label.className = 'nav-btn active';
+        label.disabled = true;
+        label.innerHTML = '<i class="fas fa-heart"></i><span>いいね一覧</span>';
+        bottomNav.append(back, label);
+        return;
+    }
     currentSource.periods.forEach((period) => {
         const button = document.createElement('button');
         button.type = 'button';
@@ -217,19 +371,19 @@ function renderPeriodBar() {
     }
 }
 
-function showMessage(title, message, onRetry) {
+function showMessage(title, message, onRetry, options = {}) {
     videoFeed.replaceChildren();
     const wrap = document.createElement('div');
     wrap.className = 'error-state';
     const icon = document.createElement('i');
-    icon.className = 'fas fa-exclamation-triangle';
+    icon.className = `fas ${options.icon || 'fa-exclamation-triangle'}`;
     const heading = document.createElement('h3');
     heading.textContent = title;
     const paragraph = document.createElement('p');
     paragraph.textContent = message;
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = '再読み込み';
+    button.textContent = options.buttonText || '再読み込み';
     button.addEventListener('click', onRetry);
     wrap.append(icon, heading, paragraph, button);
     videoFeed.appendChild(wrap);
@@ -240,8 +394,12 @@ function createVideoCard(video, index) {
     card.className = 'video-card';
     card.dataset.index = String(index);
 
-    const poster = posterFor(currentSource.id, video.thumbUrl);
-    const chipColor = safeColor(currentSource.color);
+    // A bookmarked video keeps its own source (the list mixes sites).
+    const cardSource = sourceInfo(sourceOf(video));
+    const poster = posterFor(cardSource.id, video.thumbUrl);
+    const chipColor = safeColor(cardSource.color);
+    const liked = Logic.isBookmarked(bookmarks, cardSource.id, video.id);
+    const badgeIcon = video._bookmark ? 'fa-heart' : rankIcon(video.rank);
 
     card.innerHTML = `
     <div class="video-wrapper">
@@ -250,14 +408,14 @@ function createVideoCard(video, index) {
     <div class="gradient-top"></div>
     <div class="gradient-bottom"></div>
     <div class="ranking-badge ${rankClass(video.rank)}">
-      <i class="fas ${rankIcon(video.rank)} rank-icon"></i>
+      <i class="fas ${badgeIcon} rank-icon"></i>
       <span></span>
     </div>
     <div class="play-pause-overlay" data-index="${index}">
       <div class="play-icon" id="playIcon-${index}"><i class="fas fa-play"></i></div>
     </div>
     <div class="side-actions">
-      <button class="action-btn like-btn" type="button">
+      <button class="action-btn like-btn${liked ? ' liked' : ''}" type="button" aria-pressed="${liked ? 'true' : 'false'}">
         <div class="btn-icon"><i class="fas fa-heart"></i></div>
         <span class="btn-label">いいね</span>
       </button>
@@ -284,12 +442,15 @@ function createVideoCard(video, index) {
 
     card.querySelector('.ranking-badge span').textContent = video.rankLabel || `No.${video.rank}`;
     const sourceChip = card.querySelector('.info-source');
-    sourceChip.querySelector('span').textContent = currentSource.name;
+    sourceChip.querySelector('span').textContent = cardSource.name;
     sourceChip.style.color = chipColor;
     sourceChip.style.borderColor = chipColor;
     sourceChip.style.background = 'rgba(255,255,255,0.06)';
     card.querySelector('.info-title').textContent = video.title || `ランキング ${video.rankLabel || video.rank}`;
-    const meta = [video.duration, video.views].filter(Boolean).join(' · ');
+    const likedOn = video._bookmark && video.likedAt
+        ? `${new Date(video.likedAt).toLocaleDateString('ja-JP')} にいいね`
+        : '';
+    const meta = [video.duration, video.views, likedOn].filter(Boolean).join(' · ');
     card.querySelector('.info-meta').textContent = meta;
     const media = card.querySelector('video');
     media.addEventListener('error', () => {
@@ -416,6 +577,14 @@ function sourceOf(video) {
     return (video && video._sourceId) || currentSource.id;
 }
 
+// Name and color for a source id; one the server no longer lists (a liked
+// video from a removed source) still gets a chip with its id.
+function sourceInfo(sourceId) {
+    return sources.find((source) => source.id === sourceId)
+        || (currentSource && currentSource.id === sourceId ? currentSource : null)
+        || { id: sourceId, name: sourceId, color: '' };
+}
+
 async function resolvePlayback(video, fresh) {
     if (video.playback.kind !== 'resolve') return video.playback;
     const response = await fetch(Logic.resolveUrl(sourceOf(video), video.id, fresh));
@@ -447,6 +616,13 @@ const SKIP_DELAY_MS = 1200;
 function skipAfter(card, index, attempt, text) {
     showCardMessage(card, text);
     showPlayIcon(index, true, true);
+    // A liked video that no longer plays stays in the list (the user can
+    // unlike it); the note bar says which one it was.
+    if (bookmarkMode) {
+        const video = videos[index];
+        const name = (video && video.title) || 'いいねした動画';
+        setFallbackNote(`いいね一覧: 「${name.slice(0, 40)}」を再生できませんでした（♥で解除できます）`);
+    }
     setTimeout(() => {
         if (!Logic.playbackCurrent(attempt, playbackState())) return;
         const next = cardAt(index + 1);
@@ -455,6 +631,12 @@ function skipAfter(card, index, attempt, text) {
 }
 
 function playbackState() {
+    // The いいね一覧 mixes sources, so there the on-screen video's own source
+    // is the current one (a mode switch bumps playToken anyway).
+    if (bookmarkMode) {
+        const video = videos[currentVideoIndex];
+        return { token: playToken, index: currentVideoIndex, sourceId: video ? sourceOf(video) : '' };
+    }
     return { token: playToken, index: currentVideoIndex, sourceId: currentSource && currentSource.id };
 }
 
@@ -779,7 +961,8 @@ function preloadNext(index) {
     next._preloading = true;
     resolvePlayback(next, false).then((playback) => {
         next._preloaded = true;
-        if (currentVideoIndex !== index || !currentSource || currentSource.id !== sourceId) return;
+        if (videos[index + 1] !== next || cardAt(index + 1) !== card) return;
+        if (currentVideoIndex !== index || (!bookmarkMode && (!currentSource || currentSource.id !== sourceId))) return;
         if (mode === 'embed' || (playback && playback.kind === 'embed')) {
             const embedUrl = (playback && (playback.embedUrl || playback.url)) || next.playback.embedUrl;
             if (embedUrl && !card.querySelector('iframe.embed-player')) mountEmbed(card, embedUrl);
@@ -911,8 +1094,7 @@ function setupEventListeners() {
                 heart.style.top = (event.clientY - rect.top - 40) + 'px';
                 card.appendChild(heart);
                 setTimeout(() => heart.remove(), 900);
-                const like = card.querySelector('.like-btn');
-                if (like) like.classList.add('liked');
+                likeVideo(index, true);
                 return;
             }
             lastTapTime = now;
@@ -923,7 +1105,8 @@ function setupEventListeners() {
     videoFeed.querySelectorAll('.like-btn').forEach((button) => {
         button.addEventListener('click', (event) => {
             event.stopPropagation();
-            button.classList.toggle('liked');
+            const card = button.closest('.video-card');
+            if (card) likeVideo(Number(card.dataset.index), false);
         });
     });
 
@@ -941,7 +1124,7 @@ function setupEventListeners() {
             const video = videos[index];
             const url = (video && (video.externalUrl || video.pageUrl)) || location.href;
             if (navigator.share) {
-                try { await navigator.share({ title: currentSource.name, url }); } catch { /* dismissed */ }
+                try { await navigator.share({ title: sourceInfo(sourceOf(video)).name, url }); } catch { /* dismissed */ }
             } else {
                 await navigator.clipboard.writeText(url);
                 const label = button.querySelector('.btn-label');
@@ -958,7 +1141,7 @@ function setupEventListeners() {
             if (!video) return;
             if (video.lookup) {
                 try {
-                    const response = await fetch(`/api/external?source=${encodeURIComponent(currentSource.id)}&id=${encodeURIComponent(video.id)}`);
+                    const response = await fetch(`/api/external?source=${encodeURIComponent(sourceOf(video))}&id=${encodeURIComponent(video.id)}`);
                     const data = await response.json();
                     if (data.ok && data.url) {
                         window.open(data.url, '_blank', 'noopener,noreferrer');
@@ -1006,7 +1189,7 @@ async function retryCurrent() {
 }
 
 async function loadVideos(options = {}) {
-    if (!currentSource) return;
+    if (!currentSource || bookmarkMode) return;
     if (loadController) loadController.abort();
     loadController = new AbortController();
     const { signal } = loadController;

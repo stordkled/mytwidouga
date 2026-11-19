@@ -801,6 +801,41 @@ body {
     background: var(--accent-gradient);
 }
 
+/* いいね一覧 entry: after the sites, pinned to the right edge of the bar. */
+.source-btn.bookmark-entry {
+    position: sticky;
+    right: 0;
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-color: rgba(255, 45, 85, 0.6);
+    background: rgba(0, 0, 0, 0.92);
+    color: var(--text-primary);
+    box-shadow: -10px 0 12px rgba(0, 0, 0, 0.85);
+}
+
+.source-btn.bookmark-entry i {
+    color: var(--accent-primary);
+}
+
+.source-btn.bookmark-entry.active {
+    background: var(--accent-gradient);
+    border-color: transparent;
+}
+
+.source-btn.bookmark-entry.active i {
+    color: #fff;
+}
+
+.nav-btn.back-to-ranking {
+    color: var(--text-primary);
+}
+
+.nav-btn:disabled {
+    cursor: default;
+}
+
 .period-note {
     position: fixed;
     top: var(--source-bar-height);

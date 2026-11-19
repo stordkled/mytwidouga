@@ -134,7 +134,194 @@
         return source.defaultMetric || source.metrics[0].id;
     }
 
+    // ---- Bookmarks (いいね一覧) ---------------------------------------------
+    // Stored newest first as JSON under one localStorage key. Each entry has
+    // just enough to list it and to hand it back to the playback ladder:
+    // the original `playback` object (file / hls / embed / resolve) is kept
+    // as the ranking delivered it, and a "resolve" one is re-resolved by
+    // source + id when it plays.
+    const BOOKMARK_LIMIT = 500;
+    const PLAYBACK_KINDS = ['file', 'hls', 'embed', 'resolve'];
+
+    function str(value, max) {
+        if (value == null) return '';
+        return String(value).slice(0, max || 2000);
+    }
+
+    function bookmarkKey(sourceId, videoId) {
+        return `${sourceId}\u0000${videoId}`;
+    }
+
+    function cleanPlayback(playback) {
+        if (!playback || typeof playback !== 'object' || !PLAYBACK_KINDS.includes(playback.kind)) return null;
+        const out = {
+            kind: playback.kind,
+            url: playback.url ? str(playback.url) : null,
+            embedUrl: playback.embedUrl ? str(playback.embedUrl) : null,
+        };
+        if (playback.referer) out.referer = str(playback.referer);
+        if (playback.needsReferer) out.needsReferer = true;
+        return out;
+    }
+
+    // A feed video (as /api/videos returned it) -> a stored entry, or null
+    // when it lacks what playback needs.
+    function bookmarkFromVideo(video, sourceId, now) {
+        if (!video || video.id == null || video.id === '' || !sourceId) return null;
+        const playback = cleanPlayback(video.playback);
+        if (!playback) return null;
+        const likedAt = Number.isFinite(now) ? now : Date.now();
+        return {
+            sourceId: str(sourceId, 64),
+            id: str(video.id, 80),
+            pageUrl: str(video.pageUrl),
+            externalUrl: str(video.externalUrl || video.pageUrl),
+            title: str(video.title, 300),
+            thumbUrl: str(video.thumbUrl),
+            duration: str(video.duration, 32),
+            lookup: Boolean(video.lookup),
+            likedAt,
+            playback,
+        };
+    }
+
+    // Validate one stored entry (anything from localStorage may be garbage).
+    function cleanBookmark(entry) {
+        if (!entry || typeof entry !== 'object') return null;
+        if (typeof entry.sourceId !== 'string' || !entry.sourceId) return null;
+        if (entry.id == null || entry.id === '') return null;
+        const playback = cleanPlayback(entry.playback);
+        if (!playback) return null;
+        return {
+            sourceId: str(entry.sourceId, 64),
+            id: str(entry.id, 80),
+            pageUrl: str(entry.pageUrl),
+            externalUrl: str(entry.externalUrl || entry.pageUrl),
+            title: str(entry.title, 300),
+            thumbUrl: str(entry.thumbUrl),
+            duration: str(entry.duration, 32),
+            lookup: Boolean(entry.lookup),
+            likedAt: Number.isFinite(entry.likedAt) ? entry.likedAt : 0,
+            playback,
+        };
+    }
+
+    function limitOf(limit) {
+        return typeof limit === 'number' && limit >= 0 ? limit : BOOKMARK_LIMIT;
+    }
+
+    // Newest first, one entry per source+id, at most `limit` (oldest dropped).
+    function normalizeBookmarks(list, limit) {
+        const max = limitOf(limit);
+        const seen = new Set();
+        const out = [];
+        (Array.isArray(list) ? list : []).forEach((entry, order) => {
+            const clean = cleanBookmark(entry);
+            if (!clean) return;
+            const key = bookmarkKey(clean.sourceId, clean.id);
+            if (seen.has(key)) return;
+            seen.add(key);
+            out.push({ clean, order });
+        });
+        out.sort((a, b) => (b.clean.likedAt - a.clean.likedAt) || (a.order - b.order));
+        return out.slice(0, max).map((item) => item.clean);
+    }
+
+    // Read the list. A missing, unreadable or corrupt value is an empty list,
+    // never an exception.
+    function loadBookmarks(storage, key, limit) {
+        let raw = null;
+        try {
+            raw = storage ? storage.getItem(key) : null;
+        } catch {
+            return [];
+        }
+        if (!raw) return [];
+        try {
+            return normalizeBookmarks(JSON.parse(raw), limit);
+        } catch {
+            return [];
+        }
+    }
+
+    // Write the list. On a quota error the oldest half is dropped and it
+    // tries again, so the newest likes survive. Returns what was stored.
+    function saveBookmarks(storage, key, list) {
+        let items = Array.isArray(list) ? list.slice() : [];
+        if (!storage) return { ok: false, saved: items, trimmed: 0 };
+        const total = items.length;
+        for (;;) {
+            try {
+                storage.setItem(key, JSON.stringify(items));
+                return { ok: true, saved: items, trimmed: total - items.length };
+            } catch {
+                if (items.length === 0) return { ok: false, saved: Array.isArray(list) ? list.slice() : [], trimmed: 0 };
+                items = items.slice(0, Math.floor(items.length / 2));
+            }
+        }
+    }
+
+    function isBookmarked(list, sourceId, videoId) {
+        if (videoId == null) return false;
+        const key = bookmarkKey(sourceId, String(videoId));
+        return (list || []).some((entry) => bookmarkKey(entry.sourceId, entry.id) === key);
+    }
+
+    function addBookmark(list, video, sourceId, now, limit) {
+        const current = list || [];
+        if (isBookmarked(current, sourceId, video && video.id)) return current.slice();
+        const entry = bookmarkFromVideo(video, sourceId, now);
+        if (!entry) return current.slice();
+        return [entry, ...current].slice(0, limitOf(limit));
+    }
+
+    function removeBookmark(list, sourceId, videoId) {
+        const key = bookmarkKey(sourceId, String(videoId));
+        return (list || []).filter((entry) => bookmarkKey(entry.sourceId, entry.id) !== key);
+    }
+
+    // Like / unlike. `liked` is the state after the toggle.
+    function toggleBookmark(list, video, sourceId, now, limit) {
+        if (!video || video.id == null) return { list: (list || []).slice(), liked: false };
+        if (isBookmarked(list, sourceId, video.id)) {
+            return { list: removeBookmark(list, sourceId, video.id), liked: false };
+        }
+        const next = addBookmark(list, video, sourceId, now, limit);
+        return { list: next, liked: isBookmarked(next, sourceId, video.id) };
+    }
+
+    // Stored entries -> feed videos (newest first) for the same card UI.
+    function bookmarkVideos(list) {
+        const entries = normalizeBookmarks(list, Infinity);
+        return entries.map((entry, index) => ({
+            id: entry.id,
+            title: entry.title,
+            rank: 0,
+            rankLabel: `${index + 1}/${entries.length}`,
+            pageUrl: entry.pageUrl,
+            thumbUrl: entry.thumbUrl,
+            duration: entry.duration,
+            views: '',
+            externalUrl: entry.externalUrl,
+            lookup: entry.lookup,
+            playback: { ...entry.playback },
+            likedAt: entry.likedAt,
+            _sourceId: entry.sourceId,
+            _bookmark: true,
+        }));
+    }
+
     return {
+        BOOKMARK_LIMIT,
+        bookmarkFromVideo,
+        normalizeBookmarks,
+        loadBookmarks,
+        saveBookmarks,
+        isBookmarked,
+        addBookmark,
+        removeBookmark,
+        toggleBookmark,
+        bookmarkVideos,
         videosUrl,
         resolveUrl,
         barSources,
