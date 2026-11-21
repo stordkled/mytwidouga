@@ -35,6 +35,8 @@
 
     --safe-bottom: env(safe-area-inset-bottom, 0px);
     --nav-height: 64px;
+    --source-bar-height: 52px;
+    --note-height: 0px;
 }
 
 /* ============================================
@@ -78,8 +80,11 @@ body {
    ============================================ */
 .loading-screen {
     position: fixed;
-    inset: 0;
-    z-index: 1000;
+    top: var(--source-bar-height);
+    right: 0;
+    bottom: calc(var(--nav-height) + var(--safe-bottom));
+    left: 0;
+    z-index: 40;
     background: var(--bg-primary);
     display: flex;
     flex-direction: column;
@@ -188,11 +193,14 @@ body {
     background: #000;
 }
 
-.video-wrapper video {
+.video-wrapper video,
+.video-wrapper iframe {
     width: 100%;
     height: 100%;
     object-fit: contain;
     display: block;
+    border: 0;
+    background: #000;
 }
 
 /* Thumbnail / Poster overlay */
@@ -210,6 +218,27 @@ body {
     pointer-events: none;
 }
 
+/* Shown over the poster until the card's video starts */
+.card-spinner {
+    display: none;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    margin: -22px 0 0 -22px;
+    border: 3px solid rgba(255, 255, 255, 0.25);
+    border-top-color: #fff;
+    border-radius: 50%;
+    z-index: 4;
+    pointer-events: none;
+    animation: spin 0.9s linear infinite;
+}
+
+.video-card.is-loading .card-spinner {
+    display: block;
+}
+
 /* Play/Pause overlay */
 .play-pause-overlay {
     position: absolute;
@@ -219,7 +248,53 @@ body {
     align-items: center;
     justify-content: center;
     cursor: pointer;
+    touch-action: pan-y;
     -webkit-tap-highlight-color: transparent;
+}
+
+.video-card.embed-interactive .play-pause-overlay {
+    pointer-events: none;
+}
+
+.embed-hint {
+    position: absolute;
+    left: 16px;
+    right: 88px;
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 72px);
+    z-index: 6;
+    padding: 8px 12px;
+    border-radius: var(--radius-full);
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+    pointer-events: none;
+}
+
+.video-card.embed-interactive .embed-hint {
+    display: none;
+}
+
+.embed-exit {
+    display: none;
+    position: absolute;
+    top: calc(var(--source-bar-height) + var(--note-height) + 12px);
+    right: 16px;
+    z-index: 30;
+    border: 0;
+    border-radius: var(--radius-full);
+    padding: 8px 12px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.video-card.embed-interactive .embed-exit {
+    display: block;
 }
 
 .play-icon {
@@ -283,7 +358,7 @@ body {
    ============================================ */
 .ranking-badge {
     position: absolute;
-    top: 16px;
+    top: calc(var(--source-bar-height) + var(--note-height) + 12px);
     left: 16px;
     z-index: 10;
     display: flex;
@@ -328,7 +403,7 @@ body {
 .side-actions {
     position: absolute;
     right: 12px;
-    bottom: calc(var(--nav-height) + var(--safe-bottom) + 40px);
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 52px);
     z-index: 10;
     display: flex;
     flex-direction: column;
@@ -413,7 +488,8 @@ body {
    ============================================ */
 .video-info {
     position: absolute;
-    bottom: calc(var(--nav-height) + var(--safe-bottom) + 16px);
+    /* Clear of the seek bar's time label below. */
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 34px);
     left: 16px;
     right: 80px;
     z-index: 10;
@@ -433,6 +509,12 @@ body {
     margin-bottom: 8px;
 }
 
+.video-info .info-meta {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
 .video-info .info-title {
     font-size: 15px;
     font-weight: 600;
@@ -446,25 +528,105 @@ body {
 }
 
 /* ============================================
-   Progress Bar
+   Seek Bar (progress + drag/tap to seek)
+   The whole strip is the touch target; the visible track is thin.
+   touch-action: none keeps a drag here from scrolling the feed.
    ============================================ */
-.video-progress {
+.video-seek {
     position: absolute;
     bottom: calc(var(--nav-height) + var(--safe-bottom));
     left: 0;
     right: 0;
-    height: 3px;
-    background: rgba(255, 255, 255, 0.15);
+    height: 30px;
     z-index: 12;
-    overflow: hidden;
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
 }
 
-.video-progress .progress-fill {
+.video-seek.disabled {
+    cursor: default;
+    pointer-events: none;
+}
+
+.seek-time {
+    position: absolute;
+    left: 12px;
+    bottom: 9px;
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+    pointer-events: none;
+}
+
+.video-seek.disabled .seek-time {
+    opacity: 0.6;
+}
+
+.video-seek.dragging .seek-time {
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.seek-track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.18);
+    transition: height 0.15s ease;
+}
+
+.video-seek:not(.disabled):hover .seek-track,
+.video-seek.dragging .seek-track {
+    height: 6px;
+}
+
+.seek-track .progress-fill {
     height: 100%;
     background: var(--accent-gradient);
     width: 0%;
     transition: width 0.1s linear;
     border-radius: 0 2px 2px 0;
+}
+
+.video-seek.dragging .progress-fill {
+    transition: none;
+}
+
+.seek-thumb {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 6px rgba(0, 0, 0, 0.5);
+    transform: translate(-50%, -50%) scale(0);
+    transition: transform 0.15s ease;
+    pointer-events: none;
+}
+
+.video-seek:not(.disabled):hover .seek-thumb,
+.video-seek.dragging .seek-thumb {
+    transform: translate(-50%, -50%) scale(1);
+}
+
+@media (hover: none) {
+    .video-seek:not(.disabled) .seek-thumb {
+        transform: translate(-50%, -50%) scale(0.75);
+    }
+
+    .video-seek.dragging .seek-thumb {
+        transform: translate(-50%, -50%) scale(1.15);
+    }
 }
 
 /* ============================================
@@ -580,7 +742,7 @@ body {
    ============================================ */
 .scroll-indicator {
     position: absolute;
-    bottom: calc(var(--nav-height) + var(--safe-bottom) + 24px);
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 40px);
     left: 50%;
     transform: translateX(-50%);
     z-index: 15;
@@ -675,23 +837,147 @@ body {
         margin: 0 auto;
     }
 
-    .bottom-nav {
+    .bottom-nav,
+    .source-bar,
+    .period-note {
         max-width: 420px;
         left: 50%;
         transform: translateX(-50%);
-        border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     }
 
-    .video-progress {
-        max-width: 420px;
-        left: 50%;
-        transform: translateX(-50%);
+    .bottom-nav {
+        border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     }
 }
 
 /* ============================================
-   Transition helpers
+   Source switcher
    ============================================ */
+.source-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--source-bar-height);
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    overflow-x: auto;
+    background: rgba(0, 0, 0, 0.78);
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    scrollbar-width: none;
+}
+
+.source-bar::-webkit-scrollbar {
+    display: none;
+}
+
+.source-btn {
+    flex: 0 0 auto;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: var(--radius-full);
+    padding: 6px 12px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.source-btn.active {
+    color: #fff;
+    border-color: transparent;
+    background: var(--accent-gradient);
+}
+
+/* いいね一覧 entry: after the sites, pinned to the right edge of the bar. */
+.source-btn.bookmark-entry {
+    position: sticky;
+    right: 0;
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-color: rgba(255, 45, 85, 0.6);
+    background: rgba(0, 0, 0, 0.92);
+    color: var(--text-primary);
+    box-shadow: -10px 0 12px rgba(0, 0, 0, 0.85);
+}
+
+.source-btn.bookmark-entry i {
+    color: var(--accent-primary);
+}
+
+.source-btn.bookmark-entry.active {
+    background: var(--accent-gradient);
+    border-color: transparent;
+}
+
+.source-btn.bookmark-entry.active i {
+    color: #fff;
+}
+
+/* Periods + 保存数/表示数 + ランダム/ランキング順 must fit a 360px phone. */
+.bottom-nav .nav-btn {
+    padding: 8px 10px;
+    min-width: 0;
+}
+
+.nav-btn.order-btn span {
+    white-space: nowrap;
+}
+
+.nav-btn.back-to-ranking {
+    color: var(--text-primary);
+}
+
+.nav-btn:disabled {
+    cursor: default;
+}
+
+.period-note {
+    position: fixed;
+    top: var(--source-bar-height);
+    left: 0;
+    right: 0;
+    z-index: 55;
+    padding: 6px 14px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: rgba(12, 12, 12, 0.92);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+body.has-note {
+    --note-height: 31px;
+}
+
+.period-note.hidden {
+    display: none;
+}
+
+.card-message {
+    position: absolute;
+    left: 16px;
+    right: 88px;
+    bottom: calc(var(--nav-height) + var(--safe-bottom) + 88px);
+    z-index: 12;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    background: rgba(0, 0, 0, 0.72);
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
 .fade-in {
     animation: fadeIn 0.5s ease forwards;
 }
@@ -705,5 +991,18 @@ body {
     to {
         opacity: 1;
         transform: translateY(0);
+    }
+}
+
+/* Source bar rules are declared after the first desktop query, so center them here. */
+@media (min-width: 768px) {
+    .source-bar,
+    .period-note {
+        left: 0;
+        right: 0;
+        width: min(420px, 100%);
+        margin-left: auto;
+        margin-right: auto;
+        transform: none;
     }
 }

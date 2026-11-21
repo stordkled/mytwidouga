@@ -1,0 +1,45 @@
+{
+  "playbackMode": "auto",
+  "fullProxyEnabled": true,
+  "maxProxyStreams": 6,
+  "maxProxyStreamsPerClient": 2,
+  "proxyQueueMs": 8000,
+  "hideFailedSources": true,
+  "hideAfterFailures": 3,
+  "hiddenRetryMs": 600000,
+  "cacheTtlMs": 1800000,
+  "resolveTtlMs": 180000,
+  "domainMemoryTtlMs": 1800000,
+  "mirrorTimeoutMs": 12000,
+  "requestTimeoutMs": 60000,
+  "sources": {
+    "twivideo": {
+      "hidden": true,
+      "bases": ["https://twivideo.net"]
+    },
+    "twikeep": {
+      "bases": ["https://www.twikeep.com"],
+      "metric": "downloads"
+    },
+    "85po": {
+      "bases": [
+        "https://www.85po.com",
+        "https://www.85po.net",
+        "https://www.85ro.com"
+      ]
+    },
+    "pornhub": {
+      "bases": [
+        "https://www.pornhub.com",
+        "https://jp.pornhub.com",
+        "https://rt.pornhub.com"
+      ]
+    },
+    "tokyomotion": {
+      "bases": ["https://www.tokyomotion.net"]
+    },
+    "twihozon": {
+      "bases": ["https://www.twihozon.org"]
+    }
+  }
+}

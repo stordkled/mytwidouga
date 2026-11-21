@@ -1,0 +1,61 @@
+{
+  "ok": true,
+  "items": [
+    {
+      "mediaKey": "2119370603694063955",
+      "tweetId": "2119370603694063955",
+      "bestVideoUrl": "https://video.twimg.com/amplify_video/2119367799462055936/vid/avc1/1080x1920/uT3nFE-SvzNjzumb.mp4?tag=29",
+      "thumbnailUrl": "https://pbs.twimg.com/amplify_video_thumb/2119367799462055936/img/SQKUvd23_1HP9aPc.jpg",
+      "count": 3,
+      "userId": "1512883870223396868",
+      "userName": "noeronolife69",
+      "userDisplayName": null,
+      "updatedAt": "2026-11-17T17:36:03.221Z"
+    },
+    {
+      "mediaKey": "2119301122334455667",
+      "tweetId": "2119301122334455667",
+      "bestVideoUrl": "https://video.twimg.com/ext_tw_video/2119301000000000000/pu/vid/avc1/720x1280/AbCdEf.mp4?tag=12",
+      "thumbnailUrl": "https://pbs.twimg.com/ext_tw_video_thumb/2119301000000000000/pu/img/AbCdEf.jpg",
+      "count": 1234,
+      "userId": "100",
+      "userName": "sample_user",
+      "userDisplayName": "サンプル",
+      "updatedAt": "2026-11-17T16:00:00.000Z"
+    },
+    {
+      "mediaKey": "2119370603694063955",
+      "tweetId": "2119370603694063955",
+      "bestVideoUrl": "https://video.twimg.com/amplify_video/2119367799462055936/vid/avc1/1080x1920/uT3nFE-SvzNjzumb.mp4?tag=29",
+      "thumbnailUrl": "https://pbs.twimg.com/amplify_video_thumb/2119367799462055936/img/SQKUvd23_1HP9aPc.jpg",
+      "count": 3,
+      "userId": "1512883870223396868",
+      "userName": "noeronolife69",
+      "userDisplayName": null,
+      "updatedAt": "2026-11-17T17:36:03.221Z"
+    },
+    {
+      "mediaKey": "2119000000000000001",
+      "tweetId": "2119000000000000001",
+      "bestVideoUrl": "https://evil.example/video.twimg.com/x.mp4",
+      "thumbnailUrl": "https://pbs.twimg.com/ext_tw_video_thumb/1/img/x.jpg",
+      "count": 2,
+      "userId": "101",
+      "userName": "other",
+      "userDisplayName": null,
+      "updatedAt": "2026-11-17T15:00:00.000Z"
+    },
+    {
+      "mediaKey": "2119000000000000002",
+      "tweetId": "2119000000000000002",
+      "bestVideoUrl": "https://video.twimg.com/ext_tw_video/2/pu/vid/avc1/480x852/y.mp4",
+      "thumbnailUrl": "javascript:alert(1)",
+      "count": 2,
+      "userId": "102",
+      "userName": "bad name!",
+      "userDisplayName": null,
+      "updatedAt": "2026-11-17T14:00:00.000Z"
+    }
+  ],
+  "nextCursor": "100"
+}
