@@ -6,8 +6,17 @@ const { proxyMedia, proxyStatus } = require('./lib/proxy');
 const mirrors = require('./lib/mirrors');
 const { closeBrowser, status: browserStatus } = require('./lib/browser');
 const { staticPath } = require('./lib/static');
+const { createTimingLog } = require('./src/feed-logic');
 
 const PORT = process.env.PORT || 3000;
+
+// Rolling server-side timings per source and stage, read from /api/status.
+// Only registered source ids are recorded, so a request cannot add labels.
+const timings = createTimingLog();
+
+function noteTiming(sourceId, stage, startedAt) {
+    if (sources.get(sourceId)) timings.add(`${sourceId}:${stage}`, Date.now() - startedAt);
+}
 
 const MIME = {
     '.html': 'text/html; charset=utf-8',
@@ -85,6 +94,7 @@ async function handle(req, res) {
             domains: sources.domainStatus(),
             playback: sources.playbackConfig(),
             proxy: proxyStatus(),
+            timings: timings.summary(),
             timestamp: new Date().toISOString(),
         });
         return;
@@ -99,8 +109,15 @@ async function handle(req, res) {
         const sourceId = url.searchParams.get('source') || 'twivideo';
         const period = url.searchParams.get('period') || url.searchParams.get('sort') || '';
         const metric = (url.searchParams.get('metric') || '').slice(0, 20);
+        // The client's startup request is sent before it knows what is hidden.
+        if (url.searchParams.get('boot') === '1' && sources.sourceHidden(sourceId)) {
+            sendJson(res, 200, { ok: false, bootSkipped: true, videos: [] });
+            return;
+        }
         try {
+            const startedAt = Date.now();
             const board = await sources.fetchRanking(sourceId, period, { metric });
+            noteTiming(sourceId, board.cached ? 'ranking-cached' : 'ranking', startedAt);
             // ?page=2,3,... is the infinite scroll's next page of the same board.
             const result = sources.pageRanking(board, url.searchParams.get('page'));
             const count = result.videos.length;
@@ -116,7 +133,9 @@ async function handle(req, res) {
         const sourceId = url.searchParams.get('source') || '';
         const id = url.searchParams.get('id') || '';
         try {
+            const startedAt = Date.now();
             const result = await sources.resolvePlayback(sourceId, id, { fresh: url.searchParams.get('fresh') === '1' });
+            noteTiming(sourceId, result.cached ? 'resolve-cached' : 'resolve', startedAt);
             // "unavailable" is a definite answer (media deleted), not a relay error.
             sendJson(res, result.ok || result.unavailable ? 200 : 502, result);
         } catch (err) {
@@ -161,7 +180,11 @@ async function handle(req, res) {
         const forwarded = req.headers['x-forwarded-proto'];
         const proto = forwarded ? String(forwarded).split(',')[0].trim() : 'http';
         const origin = req.headers.host ? `${proto}://${req.headers.host}` : '';
-        await proxyMedia(targetUrl, source, req, res, { playlistOnly, origin });
+        await proxyMedia(targetUrl, source, req, res, {
+            playlistOnly,
+            origin,
+            onFirstByte: (ms) => timings.add(`${sourceId}:proxy-first-byte`, ms),
+        });
         return;
     }
 

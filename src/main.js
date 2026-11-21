@@ -14,6 +14,8 @@ const STORAGE_PERIOD = 'shorts.period.';
 const STORAGE_METRIC = 'shorts.metric.';
 const STORAGE_BOOKMARKS = 'shorts.bookmarks';
 const STORAGE_ORDER = 'shorts.order';
+const STORAGE_LADDER = 'shorts.ladder';
+const STORAGE_BOOT = 'shorts.boot';
 const Logic = window.FeedLogic;
 
 // localStorage itself can throw (storage disabled, private mode).
@@ -76,8 +78,18 @@ let loadController = null;
 let playToken = 0;
 let activePlay = -1;
 let playbackConfig = { mode: 'auto', fullProxyEnabled: true, maxProxyStreams: 3, sources: {} };
-const sourceStrategy = new Map();
+// The ladder step that last worked, per source and media kind (with expiry).
+const ladderMemory = Logic.createLadderMemory(bookmarkStorage(), STORAGE_LADDER);
 const thumbStrategy = new Map();
+// The last board's first page, requested alongside /api/sources at startup.
+let bootFetch = null;
+// Cards beyond the first few are added after the first video starts.
+let cardFlushTimer = null;
+const CARD_FLUSH_MS = 2500;
+// Startup and swipe timings; read them with shortsTimings() in the console.
+const playTimings = Logic.createTimingLog();
+let firstPlayDone = false;
+window.shortsTimings = () => playTimings.summary();
 
 function thumbPreference(sourceId) {
     const configured = playbackConfig.thumbs && playbackConfig.thumbs[sourceId];
@@ -88,6 +100,22 @@ function thumbPreference(sourceId) {
 function posterFor(sourceId, remote) {
     if (!remote) return '';
     return thumbPreference(sourceId) === 'proxy' ? mediaProxy(sourceId, remote) : remote;
+}
+
+// The poster probe no longer holds up the feed: cards render with the direct
+// URL, and only a source whose thumbnails need the relay is switched after.
+function probeThumbs(sourceId, sample) {
+    ensureThumbMode(sourceId, sample).then(() => refreshPosters(sourceId));
+}
+
+function refreshPosters(sourceId) {
+    videoFeed.querySelectorAll('.video-card').forEach((card) => {
+        const video = videos[Number(card.dataset.index)];
+        const media = card.querySelector('video');
+        if (!video || !media || !video.thumbUrl || sourceOf(video) !== sourceId) return;
+        const poster = posterFor(sourceId, video.thumbUrl).replace(/"/g, '');
+        if (media.getAttribute('poster') !== poster) media.setAttribute('poster', poster);
+    });
 }
 
 function ensureThumbMode(sourceId, sample) {
@@ -333,7 +361,7 @@ async function loadMoreVideos() {
         rankingVideos = Logic.uniqueVideos(rankingVideos.concat(pageVideos));
         const start = videos.length;
         videos = Logic.appendFeed(videos, pageVideos, feedOrder);
-        appendCards(start);
+        appendCards();
         nothingNew = videos.length === start;
     } catch (err) {
         // A network error stops the scroll here; a reload starts over.
@@ -346,9 +374,12 @@ async function loadMoreVideos() {
     if (nothingNew && generation === feedGeneration) maybeLoadMore(currentVideoIndex);
 }
 
-// Add cards for videos[start..] without touching the ones already shown.
-function appendCards(start) {
+// Add a card for every video that has none yet, without touching the ones
+// already shown. Cards are in feed order, so the count is the next index.
+function appendCards() {
     const added = [];
+    const start = videoFeed.querySelectorAll('.video-card').length;
+    if (start === 0) return;
     for (let index = start; index < videos.length; index += 1) {
         const card = createVideoCard(videos[index], index);
         videoFeed.appendChild(card);
@@ -377,18 +408,15 @@ async function openBookmarks() {
         });
         return;
     }
-    const list = videos;
-    setLoading(true, 'いいね一覧を読み込み中...');
     const samples = new Map();
-    list.forEach((video) => {
+    videos.forEach((video) => {
         if (video.thumbUrl && !samples.has(video._sourceId)) samples.set(video._sourceId, video.thumbUrl);
     });
-    await Promise.all([...samples].map(([sourceId, sample]) => ensureThumbMode(sourceId, sample)));
-    if (!bookmarkMode || videos !== list) return;
     renderVideos(videos);
     currentVideoIndex = 0;
     videoFeed.scrollTo({ top: 0 });
     setLoading(false);
+    samples.forEach((sample, sourceId) => probeThumbs(sourceId, sample));
 }
 
 function exitBookmarks() {
@@ -491,7 +519,7 @@ function orderButton() {
 // load is running, that load applies the new order when it renders.
 function applyFeedOrder() {
     if (bookmarkMode || isLoading || rankingVideos.length === 0) return;
-    const fresh = rankingVideos.map(({ _preloading, _preloaded, ...video }) => video);
+    const fresh = rankingVideos.slice();
     videos = Logic.orderFeed(fresh, feedOrder);
     renderVideos(videos);
     currentVideoIndex = 0;
@@ -532,6 +560,7 @@ function createVideoCard(video, index) {
     <div class="video-wrapper">
       <video muted playsinline preload="none" referrerpolicy="no-referrer" ${poster ? `poster="${poster.replace(/"/g, '')}"` : ''}></video>
     </div>
+    <div class="card-spinner" aria-hidden="true"></div>
     <div class="gradient-top"></div>
     <div class="gradient-bottom"></div>
     <div class="ranking-badge ${rankClass(video.rank)}">
@@ -584,6 +613,13 @@ function createVideoCard(video, index) {
     card.querySelector('.info-meta').textContent = meta;
     const media = card.querySelector('video');
     media.addEventListener('error', () => {
+        // A failed background preload is not this card's failure: drop it
+        // and keep the poster. The ladder runs normally when the card plays.
+        if (card._warmUrl) {
+            card._warmUrl = null;
+            releaseMedia(media);
+            return;
+        }
         if (media.getAttribute('poster')) media.removeAttribute('poster');
     });
     media.addEventListener('ended', () => {
@@ -618,9 +654,29 @@ function createVideoCard(video, index) {
 function renderVideos(list) {
     stopAll();
     videoFeed.replaceChildren();
-    list.forEach((video, index) => videoFeed.appendChild(createVideoCard(video, index)));
+    list.slice(0, Logic.INITIAL_CARDS).forEach((video, index) => videoFeed.appendChild(createVideoCard(video, index)));
     setupObserver();
     setupEventListeners();
+    if (list.length > Logic.INITIAL_CARDS) scheduleCardFlush(CARD_FLUSH_MS);
+}
+
+function cancelCardFlush() {
+    if (cardFlushTimer) clearTimeout(cardFlushTimer);
+    cardFlushTimer = null;
+}
+
+function scheduleCardFlush(delay) {
+    cancelCardFlush();
+    cardFlushTimer = setTimeout(flushCards, delay);
+}
+
+function flushCards() {
+    cancelCardFlush();
+    appendCards();
+}
+
+function setCardLoading(card, loading) {
+    if (card) card.classList.toggle('is-loading', loading);
 }
 
 function cardAt(index) {
@@ -644,6 +700,9 @@ function releaseMedia(media) {
 
 function stopCard(card) {
     if (!card) return;
+    setCardLoading(card, false);
+    card._warmUrl = null;
+    card._warmEmbed = false;
     if (card._hls) {
         card._hls.destroy();
         card._hls = null;
@@ -651,6 +710,7 @@ function stopCard(card) {
     const media = card.querySelector('video');
     if (media) {
         releaseMedia(media);
+        media.preload = 'none';
         media.style.display = '';
     }
     const frame = card.querySelector('iframe.embed-player');
@@ -667,6 +727,7 @@ function stopCard(card) {
 }
 
 function stopAll() {
+    cancelCardFlush();
     playToken += 1;
     activePlay = -1;
     videoFeed.querySelectorAll('.video-card').forEach(stopCard);
@@ -855,8 +916,36 @@ function sourceInfo(sourceId) {
         || { id: sourceId, name: sourceId, color: '' };
 }
 
-async function resolvePlayback(video, fresh) {
-    if (video.playback.kind !== 'resolve') return video.playback;
+// One answer per video for a short while, and one request at a time, so the
+// preload and the play that follows it share the same resolve. A signed URL
+// near its end is never reused; fresh=1 always goes to the server.
+function resolvePlayback(video, fresh) {
+    if (video.playback.kind !== 'resolve') return Promise.resolve(video.playback);
+    if (!fresh) {
+        const hit = video._resolved;
+        const now = Date.now();
+        if (hit && now - hit.at < Logic.CLIENT_RESOLVE_TTL_MS && Logic.playbackFresh(hit.playback, now)) {
+            return Promise.resolve(hit.playback);
+        }
+        if (video._resolving) return video._resolving;
+    }
+    video._resolved = null;
+    const request = (async () => {
+        try {
+            const playback = await fetchPlayback(video, fresh);
+            if (video._resolving === request && playback.kind !== 'embed') {
+                video._resolved = { playback, at: Date.now() };
+            }
+            return playback;
+        } finally {
+            if (video._resolving === request) video._resolving = null;
+        }
+    })();
+    video._resolving = request;
+    return request;
+}
+
+async function fetchPlayback(video, fresh) {
     const response = await fetch(Logic.resolveUrl(sourceOf(video), video.id, fresh));
     const data = await response.json();
     if (!data.ok || !data.playback) {
@@ -884,6 +973,8 @@ function applyResolvedTitle(card, video, playback) {
 const SKIP_DELAY_MS = 1200;
 
 function skipAfter(card, index, attempt, text) {
+    setCardLoading(card, false);
+    flushCards();
     showCardMessage(card, text);
     showPlayIcon(index, true, true);
     // A liked video that no longer plays stays in the list (the user can
@@ -960,10 +1051,16 @@ function prepareVideo(media) {
     media.playsInline = true;
 }
 
-function waitUntilPlaying(media, timeout = 15000) {
+function waitUntilPlaying(media, stallMs, timeout = 15000) {
     return new Promise((resolve) => {
         if (media.error) {
             resolve(false);
+            return;
+        }
+        // A preloaded element may already have its first frame, and then
+        // no loadeddata event is coming.
+        if (media.readyState >= 2) {
+            resolve(true);
             return;
         }
         const timer = setTimeout(() => finish(media.readyState >= 1 && !media.error), timeout);
@@ -975,8 +1072,9 @@ function waitUntilPlaying(media, timeout = 15000) {
                 readyState: media.readyState,
                 networkState: media.networkState,
                 elapsedMs: Date.now() - started,
+                stallMs,
             })) finish(false);
-        }, 1000);
+        }, 250);
         const ok = () => {
             if (media.error) {
                 finish(false);
@@ -1002,14 +1100,16 @@ function waitUntilPlaying(media, timeout = 15000) {
     });
 }
 
-function mountFile(card, index, url) {
+function mountFile(card, index, url, stallMs) {
     const media = card.querySelector('video');
     media.style.display = '';
     prepareVideo(media);
+    media.preload = 'auto';
     // Assign src first: that resets media.error. Waiting first would see the
     // error left by the previous ladder step and fail this step at once.
-    media.src = url;
-    const started = waitUntilPlaying(media);
+    // A preloaded element already holds this URL and keeps its buffer.
+    if (media.getAttribute('src') !== url) media.src = url;
+    const started = waitUntilPlaying(media, stallMs);
     const playPromise = media.play();
     if (playPromise) playPromise.catch(() => {});
     return started;
@@ -1023,12 +1123,12 @@ function useNativeHls(media) {
     return !!media.canPlayType('application/vnd.apple.mpegurl');
 }
 
-function mountHls(card, index, url) {
+function mountHls(card, index, url, stallMs) {
     const media = card.querySelector('video');
     media.style.display = '';
     prepareVideo(media);
     if (useNativeHls(media)) {
-        return mountFile(card, index, url);
+        return mountFile(card, index, url, stallMs);
     }
     if (!window.Hls || !window.Hls.isSupported()) return Promise.resolve(false);
     if (card._hls) {
@@ -1045,26 +1145,43 @@ function mountHls(card, index, url) {
     card._hls = hls;
     return new Promise((resolve) => {
         let settled = false;
+        const frameEvents = ['loadeddata', 'playing', 'timeupdate'];
         const finish = (ok) => {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
-            media.removeEventListener('timeupdate', progress);
+            frameEvents.forEach((name) => media.removeEventListener(name, progress));
             if (!ok && card._hls === hls) {
                 hls.destroy();
                 card._hls = null;
             }
             resolve(ok);
         };
-        const timer = setTimeout(() => finish(media.currentTime > 0 && !media.error), 8000);
+        const hasFrame = () => Logic.hlsFrameReady({
+            readyState: media.readyState,
+            videoWidth: media.videoWidth,
+            hasError: Boolean(media.error),
+        });
         const progress = () => {
-            if (media.currentTime > 0 && !media.error) finish(true);
+            if (hasFrame()) finish(true);
         };
-        media.addEventListener('timeupdate', progress);
+        // A loaded segment is not success (it may be audio only), but it
+        // earns a short extra wait for the first frame to decode.
+        let fragmentLoaded = false;
+        let timer = setTimeout(() => {
+            if (hasFrame() || !fragmentLoaded) {
+                finish(hasFrame());
+                return;
+            }
+            timer = setTimeout(() => finish(hasFrame()), Logic.HLS_FIRST_FRAME_GRACE_MS);
+        }, stallMs || 8000);
+        frameEvents.forEach((name) => media.addEventListener(name, progress));
         hls.on(window.Hls.Events.ERROR, (_, data) => {
             if (data && data.fatal) finish(false);
         });
-        hls.on(window.Hls.Events.FRAG_LOADED, progress);
+        hls.on(window.Hls.Events.FRAG_LOADED, () => {
+            fragmentLoaded = true;
+        });
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
             media.muted = isMuted;
             media.play().then(() => {
@@ -1081,6 +1198,7 @@ function isHls(playback) {
 }
 
 function clearMedia(card) {
+    card._warmUrl = null;
     if (card._hls) {
         card._hls.destroy();
         card._hls = null;
@@ -1088,8 +1206,18 @@ function clearMedia(card) {
     releaseMedia(card.querySelector('video'));
 }
 
+// The element was preloaded with exactly the URL this step is about to play.
+function holdsWarmMedia(card, mode, playback) {
+    if (mode !== 'direct' || !playback || isHls(playback) || !card._warmUrl) return false;
+    const media = card.querySelector('video');
+    return card._warmUrl === playback.url && media.getAttribute('src') === playback.url && !media.error;
+}
+
 async function tryMode(mode, playback, card, index) {
-    clearMedia(card);
+    // Keep what the preload buffered; anything else starts clean.
+    if (holdsWarmMedia(card, mode, playback)) card._warmUrl = null;
+    else clearMedia(card);
+    const stallMs = Logic.stepTimeoutMs(mode);
     const sourceId = sourceOf(videos[index]);
     const embedUrl = (playback && playback.embedUrl) || (videos[index] && videos[index].playback.embedUrl);
     if (mode === 'embed') {
@@ -1101,12 +1229,12 @@ async function tryMode(mode, playback, card, index) {
     const hls = isHls(playback);
     let played = false;
     if (mode === 'direct') {
-        played = hls ? await mountHls(card, index, playback.url) : await mountFile(card, index, playback.url);
+        played = hls ? await mountHls(card, index, playback.url, stallMs) : await mountFile(card, index, playback.url, stallMs);
     } else if (mode === 'playlist-proxy' && hls) {
-        played = await mountHls(card, index, playlistProxy(sourceId, playback.url));
+        played = await mountHls(card, index, playlistProxy(sourceId, playback.url), stallMs);
     } else if (mode === 'proxy') {
         const proxied = mediaProxy(sourceId, playback.url);
-        played = hls ? await mountHls(card, index, proxied) : await mountFile(card, index, proxied);
+        played = hls ? await mountHls(card, index, proxied, stallMs) : await mountFile(card, index, proxied, stallMs);
     }
     return played;
 }
@@ -1130,13 +1258,17 @@ async function playCard(index) {
     activePlay = index;
     const token = ++playToken;
     currentVideoIndex = index;
+    const playStartedAt = performance.now();
+    const timingKind = firstPlayDone ? 'swipe' : 'startup';
+    card._warmEmbed = false;
     try {
         videoFeed.querySelectorAll('.video-card').forEach((other, otherIndex) => {
-            if (otherIndex !== index) stopCard(other);
+            if (otherIndex !== index && !isWarmAhead(other, otherIndex, index)) stopCard(other);
         });
     } finally {
         syncPlay = false;
     }
+    setCardLoading(card, true);
 
     const sourceId = sourceOf(video);
     // Everything below belongs to this attempt; a source switch, a new
@@ -1162,13 +1294,14 @@ async function playCard(index) {
     }
     if (!current()) return;
     applyResolvedTitle(card, video, playback);
+    playTimings.add(`${sourceId}:${timingKind}-resolve`, performance.now() - playStartedAt);
 
-    let modes = modesFor(forced, isHls(playback), playbackNeedsProxy(playback));
-    const known = sourceStrategy.get(sourceId);
-    if (known && !playback.needsReferer) {
-        const at = modes.indexOf(known);
-        if (at > 0) modes = modes.slice(at);
-    }
+    const ladderKind = () => (isHls(playback) ? 'hls' : 'file');
+    const orderedModes = () => Logic.orderModes(
+        modesFor(forced, isHls(playback), playbackNeedsProxy(playback)),
+        forced === 'auto' ? ladderMemory.get(sourceId, ladderKind()) : null
+    );
+    let modes = orderedModes();
 
     let resolvedOnceMore = false;
     let steps = 0;
@@ -1178,7 +1311,10 @@ async function playCard(index) {
         if (!current()) return;
         await yieldToBrowser();
         if (!current()) return;
+        const stepStartedAt = performance.now();
         let ok = await tryMode(mode, playback, card, index);
+        // Time spent in this step alone, so failure waits can be told apart.
+        if (current()) playTimings.add(`${sourceId}:step-${mode}-${ok ? 'ok' : 'fail'}`, performance.now() - stepStartedAt);
         if (Logic.shouldReResolve({
             ok,
             mode,
@@ -1200,18 +1336,28 @@ async function playCard(index) {
                 /* otherwise keep the previous URL */
             }
             if (!current()) return;
-            modes = modesFor(forced, isHls(playback), playbackNeedsProxy(playback));
+            modes = orderedModes();
             i = -1;
             continue;
         }
         if (!current()) return;
         if (ok) {
-            if (forced === 'auto') sourceStrategy.set(sourceId, mode);
+            if (forced === 'auto') ladderMemory.set(sourceId, ladderKind(), mode);
+            setCardLoading(card, false);
+            // From page open for the first video, from the swipe afterwards.
+            playTimings.add(`${sourceId}:${timingKind}`, timingKind === 'startup' ? performance.now() : performance.now() - playStartedAt);
+            playTimings.add(`${sourceId}:mode-${mode}`, performance.now() - playStartedAt);
+            firstPlayDone = true;
+            if (cardFlushTimer) scheduleCardFlush(300);
             showPlayIcon(index, false, false);
             const indicator = document.getElementById('scrollIndicator');
             if (indicator && index > 0) indicator.classList.add('hidden');
-            preloadNext(index);
+            preloadAhead(index);
             return;
+        }
+        // The remembered step stopped working: forget it right away.
+        if (forced === 'auto' && ladderMemory.get(sourceId, ladderKind()) === mode) {
+            ladderMemory.forget(sourceId, ladderKind());
         }
         clearMedia(card);
     }
@@ -1220,34 +1366,59 @@ async function playCard(index) {
     skipAfter(card, index, attempt, 'この動画を再生できませんでした。次へ進みます');
 }
 
-function preloadNext(index) {
-    const next = videos[index + 1];
-    const card = cardAt(index + 1);
-    if (!next || !card || next._preloading || next._preloaded) return;
-    const sourceId = sourceOf(next);
-    const mode = sourceStrategy.get(sourceId);
-    if (mode === 'proxy') return;
-    next._preloading = true;
-    resolvePlayback(next, false).then((playback) => {
-        next._preloaded = true;
-        if (videos[index + 1] !== next || cardAt(index + 1) !== card) return;
-        if (currentVideoIndex !== index || (!bookmarkMode && (!currentSource || currentSource.id !== sourceId))) return;
-        if (mode === 'embed' || (playback && playback.kind === 'embed')) {
-            const embedUrl = (playback && (playback.embedUrl || playback.url)) || next.playback.embedUrl;
-            if (embedUrl && !card.querySelector('iframe.embed-player')) mountEmbed(card, embedUrl);
+// A card ahead of the current one that holds preloaded media (and is not
+// itself playing: adopting a preload clears these marks).
+function isWarmAhead(card, cardIndex, currentIndex) {
+    return Logic.keepWarm(cardIndex, currentIndex) && Boolean(card._warmUrl || card._warmEmbed);
+}
+
+// While a video plays: resolve the next two, buffer the next one and fetch
+// metadata for the one after. Media that needs the full relay is resolved
+// only, because a viewer has just two relay slots and the playing video
+// holds one of them.
+function preloadAhead(index) {
+    for (let offset = 1; offset <= Logic.PRELOAD_AHEAD; offset += 1) preloadCard(index, offset);
+}
+
+function preloadCard(index, offset) {
+    const target = index + offset;
+    const video = videos[target];
+    const card = cardAt(target);
+    if (!video || !card) return;
+    const sourceId = sourceOf(video);
+    const forced = (playbackConfig.sources && playbackConfig.sources[sourceId]) || playbackConfig.mode || 'auto';
+    resolvePlayback(video, false).then((playback) => {
+        if (videos[target] !== video || cardAt(target) !== card) return;
+        if (currentVideoIndex !== index || activePlay !== index) return;
+        if (!bookmarkMode && (!currentSource || currentSource.id !== sourceId)) return;
+        if (!playback) return;
+        if (forced === 'embed' || playback.kind === 'embed') {
+            const embedUrl = playback.embedUrl || playback.url || video.playback.embedUrl;
+            if (offset === 1 && embedUrl && !card.querySelector('iframe.embed-player')) {
+                mountEmbed(card, embedUrl);
+                card._warmEmbed = true;
+            }
             return;
         }
         // An IP-bound or Referer-checked URL only plays through the relay;
         // a direct preload would just fail against the CDN.
-        if (!playback || !playback.url || mode === 'proxy' || playbackNeedsProxy(playback)) return;
+        if (!playback.url || isHls(playback) || playbackNeedsProxy(playback)) return;
+        if (forced !== 'auto' && forced !== 'direct') return;
+        const learned = forced === 'auto' ? ladderMemory.get(sourceId, 'file') : 'direct';
+        if (learned && learned !== 'direct') return;
         const media = card.querySelector('video');
-        if (!media || media.getAttribute('src')) return;
+        if (!media) return;
+        // Was two ahead and is now next: raise metadata to a full buffer.
+        if (card._warmUrl === playback.url && media.getAttribute('src') === playback.url) {
+            media.preload = Logic.preloadLevel(offset);
+            return;
+        }
+        if (media.getAttribute('src')) return;
         prepareVideo(media);
-        media.preload = 'metadata';
-        if (!isHls(playback) && (mode === 'direct' || !mode)) media.src = playback.url;
-    }).catch(() => {
-        next._preloaded = true;
-    });
+        media.preload = Logic.preloadLevel(offset);
+        card._warmUrl = playback.url;
+        media.src = playback.url;
+    }).catch(() => { /* the ladder resolves again when the card plays */ });
 }
 
 let feedObserver = null;
@@ -1262,7 +1433,7 @@ function setupObserver() {
             if (entry.isIntersecting && entry.intersectionRatio >= 0.6) {
                 playCard(index);
                 maybeLoadMore(index);
-            } else if (index !== currentVideoIndex) {
+            } else if (index !== currentVideoIndex && !isWarmAhead(entry.target, index, currentVideoIndex)) {
                 stopCard(entry.target);
             }
         });
@@ -1483,9 +1654,19 @@ async function loadVideos(options = {}) {
     setLoading(true, `${source.name} を読み込み中...`);
 
     try {
-        const response = await fetch(Logic.videosUrl(source.id, period, metric), { signal });
-        const data = await response.json();
+        const boardUrl = Logic.videosUrl(source.id, period, metric);
+        // Use the startup request if it asked for this board. Its failure
+        // answer counts too: asking again would add a second upstream failure.
+        const boot = bootFetch && bootFetch.url === boardUrl ? bootFetch.data : null;
+        bootFetch = null;
+        let data = boot ? await boot : null;
+        if (signal.aborted) return;
+        if (!data) {
+            const response = await fetch(boardUrl, { signal });
+            data = await response.json();
+        }
         if (signal.aborted || source.id !== currentSource.id) return;
+        writeSetting(STORAGE_BOOT, data.ok ? boardUrl : '');
         if (!data.ok) {
             if (data.source) {
                 sources = Logic.mergeSourceStatus(sources, [data.source]);
@@ -1517,8 +1698,7 @@ async function loadVideos(options = {}) {
         // Page 1 of the board; the infinite scroll asks for page 2, 3, ...
         rankingPage = 1;
         rankingHasMore = Boolean(data.hasMore);
-        let orderUsed = feedOrder;
-        videos = Logic.orderFeed(rankingVideos, orderUsed);
+        videos = Logic.orderFeed(rankingVideos, feedOrder);
         setFallbackNote(Logic.joinNotes(switchNote, data.fallback ? data.fallbackReason : '', data.notice));
         if (videos.length === 0) {
             showMessage('動画が見つかりませんでした', 'しばらくしてからもう一度お試しください', retryCurrent);
@@ -1526,17 +1706,11 @@ async function loadVideos(options = {}) {
             return;
         }
         const sample = videos.find((video) => video.thumbUrl);
-        await ensureThumbMode(source.id, sample && sample.thumbUrl);
-        if (signal.aborted || source.id !== currentSource.id) return;
-        // The order toggle was flipped while the thumbnails were probed.
-        if (orderUsed !== feedOrder) {
-            orderUsed = feedOrder;
-            videos = Logic.orderFeed(rankingVideos, orderUsed);
-        }
         renderVideos(videos);
         currentVideoIndex = 0;
         videoFeed.scrollTo({ top: 0 });
         setLoading(false);
+        probeThumbs(source.id, sample && sample.thumbUrl);
     } catch (err) {
         if (err.name === 'AbortError') return;
         showMessage(`${source.name} を読み込めませんでした`, '通信エラーが発生しました。再読み込みしてください。', retryCurrent);
@@ -1568,6 +1742,19 @@ document.addEventListener('keydown', (event) => {
 
 async function init() {
     setLoading(true, 'サイトを読み込み中...');
+    // The last good board is requested alongside the source list. The boot
+    // mark makes the server decline a now-hidden source without contacting
+    // it; loadVideos then uses the answer only if this is the board to open.
+    const lastBoard = readSetting(STORAGE_BOOT);
+    bootFetch = Logic.isBootUrl(lastBoard)
+        ? {
+            url: lastBoard,
+            data: fetch(Logic.bootRequestUrl(lastBoard))
+                .then((response) => response.json())
+                .then((answer) => (answer && answer.bootSkipped ? null : answer))
+                .catch(() => null),
+        }
+        : null;
     try {
         const response = await fetch('/api/sources');
         const data = await response.json();

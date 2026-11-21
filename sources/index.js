@@ -5,6 +5,7 @@ const {
 } = require('../lib/video');
 const mirrors = require('../lib/mirrors');
 const { withAutoplay } = require('../lib/playback');
+const { resolveCacheTtl } = require('../src/feed-logic');
 
 // Register a source by adding its module here. The file must export the
 // fields documented in the README section "Adding a source".
@@ -316,7 +317,8 @@ async function resolvePlayback(sourceId, videoId, options = {}) {
     if (options.fresh) resolveCache.delete(cacheKey);
     const timeout = adapter.timeoutMs || mirrors.settings().requestTimeoutMs;
     try {
-        const loaded = await resolveCache.getOrLoad(cacheKey, mirrors.settings().resolveTtlMs, () => (
+        const baseTtl = mirrors.settings().resolveTtlMs;
+        const loaded = await resolveCache.getOrLoad(cacheKey, (playback) => resolveCacheTtl(playback, baseTtl, Date.now()), () => (
             withTimeout(Promise.resolve(adapter.resolvePlayback(String(videoId))), timeout, adapter.name)
         ));
         return { ok: true, cached: loaded.cached, playback: decoratePlayback(loaded.value) };

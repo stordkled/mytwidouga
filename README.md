@@ -56,7 +56,36 @@ In `auto`, each source remembers the first step that starts playback:
 3. **proxy** — the full relay, only while `fullProxyEnabled` is true and fewer than `maxProxyStreams` relays are open.
 4. **embed** — `getEmbedUrl`, in a sandboxed iframe (`allow-scripts allow-same-origin allow-presentation`, no popups or top navigation) with `autoplay=1&muted=1` added when the URL accepts a query. A transparent layer keeps vertical swipes on the feed and forwards a tap to the player. The rank and title stay on top of the iframe. The next card is preloaded unless that would open a full relay.
 
-The media URL is resolved when the card is about to play. If that attempt fails, the app resolves once more, then steps down for that video. A datacenter and a phone can land on different steps when a CDN binds the URL to the IP that resolved it. `PLAYBACK_MODE=embed` skips straight to the iframe. Headless Chrome, if used, is limited to one page.
+The step that worked is remembered per source and media kind for 30 minutes (memory and `shorts.ladder` in `localStorage`) and tried first next time; the other steps stay behind it, and a remembered step that fails is forgotten. An embed is never remembered. A step without data gives up after 6 s (direct), 7 s (playlist-proxy) or 12 s (full relay, which may wait in the 8 s queue). An HLS step counts as working only once a video frame is decoded; if a segment has arrived by the deadline, it gets 3 s more for that frame.
+
+While a video plays, the next two cards are resolved. The next one buffers (`preload="auto"`) and the one after loads metadata when they can play direct; cards further away are released. Media that needs the full relay is resolved but not buffered ahead, because a viewer has two relay slots and the playing video holds one.
+
+**Timings**: `GET /api/status` has `timings` (per `source:stage`: `ranking`, `resolve`, their `-cached` forms, `proxy-first-byte`; count, p50, p95, max). In the browser console, `shortsTimings()` reports `startup` (from page open), `swipe` (from the moment the card starts playing, so the scroll itself is not counted), their `-resolve` part, `mode-<step>` (the whole wait until that step played) and `step-<step>-ok|fail` (that step alone) in ms.
+
+**Measured before/after** (plan 6b033497, 2026-11-21 15:01–15:37 JST): `bbeb7b9` on :3951 and this change on :3952 ran side by side on the same Windows PC and connection, each starting with an empty memory cache. Headless Chrome (412×860, muted autoplay) opened a new incognito context for every trial, so its cache and `localStorage` were empty (only `shorts.source` was set). The two versions took turns, and the feed used the default weighted random order. *Startup* runs from navigation to the first `<video>` `playing`, 5 trials per source with a 45 s timeout. *Swipe* runs from scrolling to the next card, after 4 s of viewing, until that card or the card skipped to plays, 10 per source with a 30 s timeout. An iframe embed has no `playing` event, so embeds are counted but left out of the medians. Values are median / p95 / failures.
+
+| Source | Startup before | Startup after | Swipe before | Swipe after |
+| --- | --- | --- | --- | --- |
+| Pornhub | 7.52 s / 9.51 s / 0 | 4.47 s / 5.00 s / 0 (−41%) | 4.77 s / 7.16 s / 0 | 1.77 s / 2.41 s / 0 (−63%) |
+| 85po | 3.74 s / 20.86 s / 0 | 3.76 s / 3.96 s / 0 | 2.27 s for the first (direct); the other 9 fell to a preloaded embed | 0.01 s / 0.01 s / 0 (all 10 direct) |
+| TwiKeep | 1.45 s / 17.38 s / 0 | 1.35 s / 13.24 s / 0 | 0.05 s / 0.11 s / 0 | 0.01 s / 0.01 s / 0 |
+| Twihozon | 5 of 5 failed | 5 of 5 failed | not measured | not measured |
+| TokyoMotion | 21.38 s / 26.28 s / 0 (3 valid) | 16.74 s / 25.16 s / 0 | 8 of 8 failed | 9 of 10 failed (the one success: 14.77 s) |
+
+Where the time went, from browser Resource Timing (median before → after):
+- **Startup resolve:** Pornhub 4.8 s → 2.5 s.
+- **Swipe resolve:** no `/api/resolve` call follows a swipe any more because the next card was resolved ahead. Before, the call took 3.2 s (Pornhub) and 4 ms (85po).
+- **Ranking:** 2–4 ms with a warm cache in both versions.
+- **Proxy first byte:** Pornhub 144 → 152 ms at startup and 453 → 480 ms on a swipe.
+
+Limits:
+- **Upstream sources:** Twihozon's top ~19 videos were deleted upstream (`video.twimg.com` answered 403/404), so both versions kept skipping until the timeout. TokyoMotion detail pages timed out on the server in both versions during the run, and the swipe run was stopped early. Neither result reflects this change.
+- **Excluded samples:** one TokyoMotion startup before the change opened Pornhub instead and is excluded, and one played as an embed.
+- **Method:** these are headless runs, not a phone. Small samples make p95 close to the maximum, and the two versions did not always play the same videos. Startup ran with empty storage, so it leaves out the `shorts.boot` early board fetch.
+
+Raw data: `mytwidouga-6b033497-perf-20261121-1536.json` (kept outside the repository).
+
+The media URL is resolved when the card is about to play, unless a preload already did. If that attempt fails, the app resolves once more, then steps down for that video. A datacenter and a phone can land on different steps when a CDN binds the URL to the IP that resolved it. `PLAYBACK_MODE=embed` skips straight to the iframe. Headless Chrome, if used, is limited to one page.
 
 ## Sources
 
@@ -89,7 +118,7 @@ The last site and its period are stored in `localStorage`. A browser with nothin
 - `GET /api/external?source=twivideo&id=...` — original-post URL for sources that need a lookup.
 - `GET /proxy/media?source=pornhub&url=...` — streams a URL whose host is on that source's allowlist, with that source's Referer. m3u8 responses are rewritten so segments and keys also go through the proxy. Private hosts and unknown hosts are rejected.
 
-Rankings are cached per source and period for 30 minutes. Resolved media URLs are cached for 3 minutes because many of them are signed. A domain that already answered is reused until `DOMAIN_MEMORY_TTL_MS`, so a later period does not probe the failing domains again.
+Rankings are cached per source and period for 30 minutes. Resolved media URLs are cached for 3 minutes because many of them are signed, or until 20 seconds before the expiry the URL itself names if that is sooner; an embed fallback is kept for 30 seconds. A domain that already answered is reused until `DOMAIN_MEMORY_TTL_MS`, so a later period does not probe the failing domains again.
 
 ## Adding a source
 

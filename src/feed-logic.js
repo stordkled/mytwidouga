@@ -126,10 +126,192 @@
     // the relay queue wait (proxyQueueMs, 8 s) so a queued proxy still counts.
     const STALL_MS = 12000;
 
-    function mediaStalled({ readyState, networkState, elapsedMs }) {
+    function mediaStalled({ readyState, networkState, elapsedMs, stallMs }) {
         if (readyState >= 1) return false;
         if (networkState === 3) return true;
-        return elapsedMs >= STALL_MS;
+        return elapsedMs >= (stallMs > 0 ? stallMs : STALL_MS);
+    }
+
+    // ---- Faster start ------------------------------------------------------
+    // How long one ladder step may sit without data. Only the full relay can
+    // wait in the server's queue (proxyQueueMs, 8 s), so only it keeps STALL_MS.
+    const STEP_TIMEOUT_MS = { direct: 6000, 'playlist-proxy': 7000, proxy: STALL_MS };
+
+    function stepTimeoutMs(mode) {
+        return STEP_TIMEOUT_MS[mode] || STALL_MS;
+    }
+
+    // Try the step that worked last time first, then the rest in ladder
+    // order, so a wrong memory still reaches every step.
+    function orderModes(modes, learned) {
+        const list = Array.isArray(modes) ? modes.slice() : [];
+        if (!learned || !list.includes(learned)) return list;
+        return [learned, ...list.filter((mode) => mode !== learned)];
+    }
+
+    const LADDER_MEMORY_TTL_MS = 30 * 60 * 1000;
+    // An embed always "succeeds" (nothing can observe the iframe), so it is
+    // never remembered: it would hide the working <video> steps.
+    const LEARNABLE_MODES = ['direct', 'playlist-proxy', 'proxy'];
+
+    // Last working step per source and media kind (file / hls), in memory and
+    // mirrored to storage. Broken or unavailable storage only loses the memory.
+    function createLadderMemory(storage, key, options = {}) {
+        const ttlMs = options.ttlMs > 0 ? options.ttlMs : LADDER_MEMORY_TTL_MS;
+        const clock = typeof options.now === 'function' ? options.now : Date.now;
+        const entries = new Map();
+        try {
+            const raw = storage ? storage.getItem(key) : null;
+            const parsed = raw ? JSON.parse(raw) : null;
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                Object.entries(parsed).forEach(([name, entry]) => {
+                    if (entry && LEARNABLE_MODES.includes(entry.mode) && Number.isFinite(entry.expires)) {
+                        entries.set(name, { mode: entry.mode, expires: entry.expires });
+                    }
+                });
+            }
+        } catch { /* start empty */ }
+
+        const nameOf = (sourceId, kind) => `${sourceId}:${kind}`;
+        const persist = () => {
+            try {
+                if (storage) storage.setItem(key, JSON.stringify(Object.fromEntries(entries)));
+            } catch { /* kept for this page */ }
+        };
+
+        return {
+            get(sourceId, kind) {
+                const name = nameOf(sourceId, kind);
+                const hit = entries.get(name);
+                if (!hit) return null;
+                if (hit.expires <= clock()) {
+                    entries.delete(name);
+                    persist();
+                    return null;
+                }
+                return hit.mode;
+            },
+            set(sourceId, kind, mode) {
+                if (!LEARNABLE_MODES.includes(mode)) return;
+                entries.set(nameOf(sourceId, kind), { mode, expires: clock() + ttlMs });
+                persist();
+            },
+            forget(sourceId, kind) {
+                if (entries.delete(nameOf(sourceId, kind))) persist();
+            },
+        };
+    }
+
+    // Signed CDN URLs name their own end time. Seconds or milliseconds; a
+    // small number under one of these names is not a timestamp.
+    const EXPIRY_PARAMS = ['validto', 'expires', 'expire', 'exp', 'e'];
+    const SIGNED_URL_MARGIN_MS = 20000;
+    const EMBED_RESOLVE_TTL_MS = 30000;
+    const CLIENT_RESOLVE_TTL_MS = 60000;
+
+    function signedUrlExpiry(url) {
+        let params;
+        try {
+            params = new URL(url).searchParams;
+        } catch {
+            return null;
+        }
+        for (const name of EXPIRY_PARAMS) {
+            const raw = params.get(name);
+            if (raw == null || !/^\d+$/.test(raw)) continue;
+            const value = Number(raw);
+            if (value >= 1e12) return value;
+            if (value >= 1e9) return value * 1000;
+        }
+        return null;
+    }
+
+    function playbackFresh(playback, now) {
+        if (!playback || !playback.url) return true;
+        const expiry = signedUrlExpiry(playback.url);
+        return expiry == null || expiry - SIGNED_URL_MARGIN_MS > now;
+    }
+
+    // How long the server may keep one resolve result. 0 means "do not
+    // store". An embed is usually the fallback after a transient failure, so
+    // it is kept only briefly and the real media gets another chance.
+    function resolveCacheTtl(playback, baseTtlMs, now) {
+        let ttl = baseTtlMs;
+        if (playback && playback.kind === 'embed') ttl = Math.min(ttl, EMBED_RESOLVE_TTL_MS);
+        const expiry = playback && playback.url ? signedUrlExpiry(playback.url) : null;
+        if (expiry != null) ttl = Math.min(ttl, expiry - SIGNED_URL_MARGIN_MS - now);
+        return Math.max(0, ttl);
+    }
+
+    // Cards around the one on screen: the next gets buffered, the one after
+    // gets metadata, anything further is released.
+    const PRELOAD_AHEAD = 2;
+
+    function keepWarm(cardIndex, currentIndex) {
+        const distance = cardIndex - currentIndex;
+        return distance >= 1 && distance <= PRELOAD_AHEAD;
+    }
+
+    function preloadLevel(offset) {
+        if (offset === 1) return 'auto';
+        return offset === 2 ? 'metadata' : 'none';
+    }
+
+    // Cards built at once; the rest follow after the first video starts, so
+    // 24 posters do not compete with it for connections.
+    const INITIAL_CARDS = 4;
+
+    // The first page of the board this browser opened last, fetched alongside
+    // /api/sources at startup. Only a plain first-page videos URL qualifies.
+    function isBootUrl(url) {
+        return typeof url === 'string'
+            && /^\/api\/videos\?source=[^&]+&period=[^&]*(?:&metric=[^&]+)?$/.test(url);
+    }
+
+    // The startup request for a board; the server declines it for a source
+    // that is hidden now, without contacting that source.
+    function bootRequestUrl(url) {
+        return `${url}&boot=1`;
+    }
+
+    // An HLS step has worked once the element holds a decoded video frame.
+    // Loaded fragments alone do not show that: they may be audio only.
+    const HLS_FIRST_FRAME_GRACE_MS = 3000;
+
+    function hlsFrameReady({ readyState, videoWidth, hasError }) {
+        return !hasError && readyState >= 2 && videoWidth !== 0;
+    }
+
+    // Small rolling timing log: per label, the last `limit` samples.
+    function createTimingLog(limit = 200, maxLabels = 128) {
+        const samples = new Map();
+        const percentile = (sorted, share) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * share))];
+        return {
+            add(label, ms) {
+                if (!Number.isFinite(ms) || ms < 0) return;
+                let list = samples.get(label);
+                if (!list) {
+                    if (samples.size >= maxLabels) return;
+                    list = [];
+                    samples.set(label, list);
+                }
+                list.push(Math.round(ms));
+                if (list.length > limit) list.shift();
+            },
+            summary() {
+                const out = {};
+                [...samples.keys()].sort().forEach((label) => {
+                    const sorted = samples.get(label).slice().sort((a, b) => a - b);
+                    out[label] = {
+                        count: sorted.length,
+                        p50: percentile(sorted, 0.5),
+                        p95: percentile(sorted, 0.95),
+                        max: sorted[sorted.length - 1],
+                    };
+                });
+                return out;
+            },
+        };
     }
 
     function nextMetric(metrics, current) {
@@ -657,6 +839,25 @@
         shouldReResolve,
         mediaStalled,
         STALL_MS,
+        stepTimeoutMs,
+        orderModes,
+        createLadderMemory,
+        LADDER_MEMORY_TTL_MS,
+        signedUrlExpiry,
+        playbackFresh,
+        resolveCacheTtl,
+        SIGNED_URL_MARGIN_MS,
+        EMBED_RESOLVE_TTL_MS,
+        CLIENT_RESOLVE_TTL_MS,
+        PRELOAD_AHEAD,
+        keepWarm,
+        preloadLevel,
+        INITIAL_CARDS,
+        isBootUrl,
+        bootRequestUrl,
+        hlsFrameReady,
+        HLS_FIRST_FRAME_GRACE_MS,
+        createTimingLog,
         nextMetric,
         pickMetric,
     };

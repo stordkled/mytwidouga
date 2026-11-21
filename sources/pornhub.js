@@ -298,16 +298,28 @@ function choosePlayable(file, hls) {
 
 async function candidatePlays(media, referer) {
     try {
-        if (media.kind === 'hls') return await hlsPlays(media.url, referer);
+        if (media.kind === 'hls') {
+            const plays = await hlsPlays(media.url, referer);
+            // Segments 404 without the watch-page Referer, so the viewer's
+            // direct and playlist-proxy steps could only fail and time out.
+            if (plays) media.needsReferer = true;
+            return plays;
+        }
         const withReferer = await fileStarts(media.url, referer);
         if (!withReferer) return false;
+        // Bound to this server's IP: the answer to a second probe cannot
+        // change the outcome.
+        if (urlIsIpBound(media.url)) {
+            media.needsReferer = true;
+            return true;
+        }
         let withoutReferer = false;
         try {
             withoutReferer = await fileStarts(media.url, '');
         } catch {
             withoutReferer = false;
         }
-        media.needsReferer = urlIsIpBound(media.url) || !withoutReferer;
+        media.needsReferer = !withoutReferer;
         return true;
     } catch {
         return false;
@@ -332,19 +344,30 @@ async function findPlayable(base, id) {
         let file = null;
         let hls = null;
         let probedShort = false;
+        // choosePlayable takes a working file over HLS, so HLS is probed
+        // (three requests) only when no file plays.
+        const hlsOptions = [];
         for (const item of rankMedia(extractMediaDefinitions(response.text))) {
-            if (file && hls) break;
+            if (file) break;
             const options = await expandItem(item, referer, cookie);
             for (const media of options) {
-                if (media.kind === 'file' && file) continue;
-                if (media.kind === 'hls' && hls) continue;
-                if (media.kind === 'hls' && shortSignedHls(media.url)) {
+                if (media.kind !== 'file') {
+                    hlsOptions.push(media);
+                } else if (await candidatePlays(media, referer)) {
+                    file = media;
+                    break;
+                }
+            }
+        }
+        if (!file) {
+            for (const media of hlsOptions) {
+                if (shortSignedHls(media.url)) {
                     if (probedShort) continue;
                     probedShort = true;
                 }
                 if (await candidatePlays(media, referer)) {
-                    if (media.kind === 'file') file = media;
-                    else hls = media;
+                    hls = media;
+                    break;
                 }
             }
         }

@@ -218,6 +218,27 @@ body {
     pointer-events: none;
 }
 
+/* Shown over the poster until the card's video starts */
+.card-spinner {
+    display: none;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    margin: -22px 0 0 -22px;
+    border: 3px solid rgba(255, 255, 255, 0.25);
+    border-top-color: #fff;
+    border-radius: 50%;
+    z-index: 4;
+    pointer-events: none;
+    animation: spin 0.9s linear infinite;
+}
+
+.video-card.is-loading .card-spinner {
+    display: block;
+}
+
 /* Play/Pause overlay */
 .play-pause-overlay {
     position: absolute;
