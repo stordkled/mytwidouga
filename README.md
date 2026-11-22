@@ -14,7 +14,119 @@ docker build -t shorts .
 docker run --rm -p 3000:3000 shorts
 ```
 
-The image is `ghcr.io/puppeteer/puppeteer`. Rankings are plain HTTP. A block page, timeout, 403, or 5xx tries the next domain in that source's list. This app does not solve Cloudflare challenges or reuse clearance cookies.
+The image is `node:22-bookworm-slim` and has no Chrome, because no source launches a browser at the moment. Rankings are plain HTTP. A block page, timeout, 403, or 5xx tries the next domain in that source's list. This app does not solve Cloudflare challenges or reuse clearance cookies.
+
+## VPSに置く手順
+
+友だちだけが見られるように、Ubuntu の VPS で動かす手順です。Caddy が HTTPS を担当し、アプリのコンテナはインターネットに直接公開しません。
+
+### 必要なもの
+
+| 項目 | 目安 |
+| --- | --- |
+| OS | Ubuntu 22.04 / 24.04 |
+| CPU / メモリ | 1 vCPU / 1GB で少人数は可能。余裕を見るなら 2 vCPU / 2GB |
+| ディスク | 10GB 以上の空き |
+| 転送量 | 中継再生は動画の通信がすべて VPS を通ります。1本 2〜5Mbps なら 1 時間で約 1〜2GB。転送量の上限を必ず確認してください |
+| ドメイン | A レコードを VPS の IP に向けたもの（HTTPS 証明書の取得に必要） |
+| 開放ポート | 22（SSH）、80、443（TCP）、443（UDP、任意） |
+
+これらは設計からの目安で、実際の VPS では計測していません。
+
+### 1. Docker を入れる
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl git
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+ファイアウォールは、SSH を先に許可してから有効にします。順番を間違えると接続できなくなります。
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw allow 443/udp
+sudo ufw enable
+```
+
+### 2. 取得して `.env` を作る
+
+```bash
+git clone <リポジトリのURL> shorts
+cd shorts
+openssl rand -hex 16   # 出力をパスワードとして使う
+touch .env
+chmod 600 .env
+nano .env              # 下の内容を書く
+```
+
+`.env` の内容です。`$` や `#` を含む値は単一引用符で囲みます。
+
+```dotenv
+DOMAIN=shorts.example.com
+BASIC_AUTH_USER=friend
+BASIC_AUTH_PASS=ここに生成したパスワード
+PORT=3000
+APP_MEMORY_LIMIT=512m
+```
+
+### 3. 起動する
+
+```bash
+sudo docker compose up -d --build
+sudo docker compose ps
+```
+
+`https://<DOMAIN>/` を開き、ユーザー名とパスワードを入れて動画が再生できれば完了です。友だちには URL とログイン情報を別々の経路で伝えてください。
+
+### 環境変数
+
+| 変数 | 必須 | 既定値 | 内容 |
+| --- | --- | --- | --- |
+| `DOMAIN` | Compose では必須 | なし | 公開するドメイン。 |
+| `BASIC_AUTH_PASS` | Compose では必須 | なし | 共有パスワード。ローカルで未設定ならログインなしで動きます。 |
+| `BASIC_AUTH_USER` | 任意 | `friend` | 共有ユーザー名。`:` は使えません。 |
+| `PORT` | 任意 | `3000` | コンテナ内でアプリが待ち受けるポート。外向きは常に 80/443 です。 |
+| `APP_MEMORY_LIMIT` | 任意 | `512m` | アプリのメモリ上限。 |
+| `TRUST_PROXY` | Compose が設定 | `1` | Caddy からの転送情報を信頼します。アプリを直接公開するときは設定しないでください。 |
+| `MAX_PROXY_STREAMS` など | 任意 | 下記参照 | 再生や中継の設定は「Domains, cache, and embeds」の表にあり、`.env` に書けば反映されます。 |
+
+ログインに成功すると 30 日間有効な Cookie が発行されます。同じ接続元から 10 回失敗すると、その接続元は最大 15 分間ログインできません。
+
+### 更新
+
+```bash
+cd shorts
+git pull
+sudo docker compose up -d --build
+sudo docker image prune -f
+```
+
+パスワードを変えるときは `.env` を編集して `sudo docker compose up -d` を実行します。全員のログインが解除されます。
+
+### ログと状態確認
+
+```bash
+sudo docker compose ps                 # 動作状況とヘルスチェック
+sudo docker compose logs -f app        # アプリのログ
+sudo docker compose logs -f caddy      # HTTPS 証明書や接続のログ
+curl -u friend https://<DOMAIN>/api/status   # パスワードを聞かれます
+```
+
+### 注意点
+
+- **再生できるサイトは家と変わることがあります。** データセンターの IP は配信元にブロックされやすく、一部のソースが表示されない場合があります。
+- **利用規約を確認してください。** アダルトコンテンツの中継を禁止している VPS があります。配信元サイトの規約と、利用者が成人であることも確認してください。
+- **`.env` は共有もコミットもしないでください。** `.gitignore` と `.dockerignore` で除外済みです。
+- **`docker compose down -v` は使わないでください。** 証明書のボリュームも消えます。停止だけなら `sudo docker compose down` です。
+- **Chrome はイメージに入っていません。** 今のソースは使っていません。将来必要になったら、Chrome を含むイメージに変更し `PUPPETEER_EXECUTABLE_PATH` を設定してください。
 
 ## Domains, cache, and embeds
 

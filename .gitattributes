@@ -1,3 +1,9 @@
 # Preserve the bytes and upstream whitespace of saved HTTP responses.
 test/fixtures/twihozon-top.html -text -whitespace
 test/fixtures/twihozon-play-14725.html -text -whitespace
+
+# Read on Linux inside or next to the containers.
+Dockerfile text eol=lf
+Caddyfile text eol=lf
+docker-compose.yml text eol=lf
+.env.example text eol=lf

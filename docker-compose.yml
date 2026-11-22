@@ -1,0 +1,54 @@
+services:
+  app:
+    build: .
+    image: twivideo-shorts:local
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      PORT: ${PORT:-3000}
+      # Only Caddy can reach this container, so its X-Forwarded-* can be trusted.
+      TRUST_PROXY: "1"
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:-friend}
+      # Compose refuses to start without a password, so the VPS is never open.
+      BASIC_AUTH_PASS: ${BASIC_AUTH_PASS:?Set BASIC_AUTH_PASS in .env}
+    # Not published to the host. Viewers come in through Caddy only.
+    expose:
+      - "${PORT:-3000}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${APP_MEMORY_LIMIT:-512m}
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+      APP_PORT: ${PORT:-3000}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging: *logging
+
+volumes:
+  # Holds the HTTPS certificates. Keep it across updates.
+  caddy_data:
+  caddy_config:

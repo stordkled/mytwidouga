@@ -6,9 +6,11 @@ const { proxyMedia, proxyStatus } = require('./lib/proxy');
 const mirrors = require('./lib/mirrors');
 const { closeBrowser, status: browserStatus } = require('./lib/browser');
 const { staticPath } = require('./lib/static');
+const { createAccessControl } = require('./lib/auth');
 const { createTimingLog } = require('./src/feed-logic');
 
 const PORT = process.env.PORT || 3000;
+const access = createAccessControl();
 
 // Rolling server-side timings per source and stage, read from /api/status.
 // Only registered source ids are recorded, so a request cannot add labels.
@@ -78,6 +80,7 @@ const server = http.createServer((req, res) => {
 
 async function handle(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
+    if (!access.guard(req, res)) return;
     let url;
     try {
         url = new URL(req.url, `http://localhost:${PORT}`);
@@ -195,6 +198,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n  TWIVIDEO Shorts`);
     console.log(`  Local:   http://localhost:${PORT}/`);
     console.log(`  Sources: ${sources.list().map((source) => source.id).join(', ')}`);
+    console.log(`  Access:  ${access.enabled ? 'password required' : 'open (BASIC_AUTH_PASS is not set)'}`);
     console.log('  Browser launches on demand.\n');
 });
 
