@@ -4,9 +4,11 @@
     "version": "1.0.0",
     "scripts": {
         "start": "node server.js",
-        "dev": "node server.js"
+        "dev": "node server.js",
+        "test": "node --test"
     },
     "dependencies": {
+        "node-html-parser": "^9.0.7",
         "puppeteer-core": "^21.11.0",
         "puppeteer-extra": "^3.3.6",
         "puppeteer-extra-plugin-stealth": "^2.11.2"
