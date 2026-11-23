@@ -94,6 +94,7 @@ async function handle(req, res) {
         sendJson(res, 200, {
             browser: browserStatus(),
             sources: sources.list(),
+            disabledSources: sources.disabledIds(),
             domains: sources.domainStatus(),
             playback: sources.playbackConfig(),
             proxy: proxyStatus(),
@@ -197,7 +198,7 @@ async function handle(req, res) {
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n  TWIVIDEO Shorts`);
     console.log(`  Local:   http://localhost:${PORT}/`);
-    console.log(`  Sources: ${sources.list().map((source) => source.id).join(', ')}`);
+    console.log(`  Sources: ${sources.list().filter((source) => source.enabled).map((source) => source.id).join(', ')}`);
     console.log(`  Access:  ${access.enabled ? 'password required' : 'open (BASIC_AUTH_PASS is not set)'}`);
     console.log('  Browser launches on demand.\n');
 });

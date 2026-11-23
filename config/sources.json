@@ -18,6 +18,7 @@
       "bases": ["https://twivideo.net"]
     },
     "twikeep": {
+      "enabled": false,
       "bases": ["https://www.twikeep.com"],
       "metric": "downloads"
     },
@@ -39,6 +40,7 @@
       "bases": ["https://www.tokyomotion.net"]
     },
     "twihozon": {
+      "enabled": false,
       "bases": ["https://www.twihozon.org"]
     }
   }

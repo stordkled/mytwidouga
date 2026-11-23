@@ -31,9 +31,10 @@
 
     // Sources for the switcher: the non-hidden ones, plus the current one so
     // the user can see where they are. If every source is hidden, show all
-    // (the user may still pick one by hand).
+    // (the user may still pick one by hand). A source disabled in config is
+    // never offered, not even as the current one.
     function barSources(sources, currentId) {
-        const all = sources || [];
+        const all = (sources || []).filter((source) => source.enabled !== false);
         // Only the current one (or nothing) left visible: that is "every
         // source hidden" from the user's point of view, so offer them all.
         if (!all.some((source) => !source.hidden)) return all.slice();
@@ -62,7 +63,12 @@
         return (sources || []).map((source) => {
             const update = byId.get(source.id);
             if (!update) return source;
-            return { ...source, hidden: Boolean(update.hidden), retryLater: Boolean(update.retryLater) };
+            return {
+                ...source,
+                enabled: update.enabled !== false,
+                hidden: Boolean(update.hidden),
+                retryLater: Boolean(update.retryLater),
+            };
         });
     }
 
@@ -81,7 +87,7 @@
     function fallbackSource(sources, currentId, failedIds) {
         const failed = failedIds instanceof Set ? failedIds : new Set(failedIds || []);
         return (sources || []).find((source) => (
-            source.id !== currentId && !source.hidden && !failed.has(source.id)
+            source.id !== currentId && source.enabled !== false && !source.hidden && !failed.has(source.id)
         )) || null;
     }
 
@@ -91,6 +97,7 @@
         empty: 'ランキングが空でした',
         http: 'サイトがエラーを返しました',
         error: '読み込みに失敗しました',
+        disabled: '設定で無効になっています',
     };
 
     function reasonText(reason) {

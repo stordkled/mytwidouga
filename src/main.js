@@ -1680,7 +1680,7 @@ async function loadVideos(options = {}) {
                 renderPeriodBar();
                 setLoading(false);
                 isLoading = false;
-                loadVideos({ note: Logic.switchNote(source.name, next.name, data.reason, !!data.hidden) });
+                loadVideos({ note: Logic.switchNote(source.name, next.name, data.reason, !!data.hidden && !data.disabled) });
                 return;
             }
             // Nothing left that has not failed: stop here (no more requests
@@ -1761,11 +1761,11 @@ async function init() {
         sources = data.sources || [];
         sourcesRefreshedAt = Date.now();
         playbackConfig = data.playback || playbackConfig;
-        if (sources.length === 0) throw new Error('ソースがありません');
+        if (Logic.barSources(sources).length === 0) throw new Error('ソースがありません');
         const saved = localStorage.getItem(STORAGE_SOURCE);
-        // A source the server no longer has (a removed adapter) is
-        // forgotten, so this browser opens on the default from now on.
-        if (saved && !sources.some((source) => source.id === saved)) {
+        // A source the server no longer has (a removed adapter) or has
+        // disabled is forgotten, so this browser opens on the default.
+        if (saved && !sources.some((source) => source.id === saved && source.enabled !== false)) {
             localStorage.removeItem(STORAGE_SOURCE);
         }
         // A source hidden in config/sources.json is not offered, even if it

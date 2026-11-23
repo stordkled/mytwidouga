@@ -1,3 +1,8 @@
+// These adapters stay tested while the shipped config disables them
+// (see disabled-sources.test.js).
+process.env.SOURCE_ENABLED_TWIKEEP = '1';
+process.env.SOURCE_ENABLED_TWIHOZON = '1';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');

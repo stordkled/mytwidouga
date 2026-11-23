@@ -1,3 +1,8 @@
+// The switcher assertions below cover all adapters, including the two that
+// the shipped config disables (see disabled-sources.test.js).
+process.env.SOURCE_ENABLED_TWIKEEP = '1';
+process.env.SOURCE_ENABLED_TWIHOZON = '1';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');

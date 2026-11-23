@@ -149,13 +149,16 @@ Edit `config/sources.json`, or override it without a code change:
 | `TRUST_PROXY` | `1` keys the per-viewer cap on `X-Forwarded-For`. Only set this behind your own reverse proxy. |
 | `SOURCE_METRIC_TWIKEEP` | `downloads` (default, saves) or `views`. Same as `"metric"` under `twikeep` in the JSON. |
 | `SOURCE_HIDDEN_TWIVIDEO` | `1`/`0` overrides `"hidden"` for one source. Hidden sources stay in the API but not in the switcher. |
+| `SOURCE_ENABLED_TWIKEEP` | `1`/`0` overrides `"enabled"` for one source. Same pattern for `TWIHOZON` and the others. |
 | `BROWSER_IDLE_MS` | Headless Chrome (if a source uses it) is closed after this long without a page. Default 5 minutes. |
 
 `config/sources.json` is re-read when its modification time changes (checked at most every 2 seconds), so edits apply without a restart. `GET /api/status` includes `domains.<id>.active`, `expiresAt`, `candidates`, the playback settings, and `proxy` (`activeStreams`, `waiting`, `clients`).
 
 `twivideo` is `"hidden": true` in the shipped config: from this network it answers with a Cloudflare page, so it is not offered and the server does not probe it on every start.
 
-The switcher order is the order in `sources/index.js`: Pornhub, 85po, TwiKeep, TokyoMotion, Twihozon (hidden `twivideo` sits between 85po and TwiKeep in the API but is not shown). Automatic switching after a failure follows the same order.
+**TwiKeep and Twihozon are currently off** (`"enabled": false` in `config/sources.json`). They are not in the switcher or feed, and their rankings are not fetched. Saved bookmarks stay and can still play. `GET /api/status` lists them in `disabledSources`. To bring one back, remove that line or set `SOURCE_ENABLED_TWIKEEP=1` / `SOURCE_ENABLED_TWIHOZON=1`.
+
+The switcher order is the order in `sources/index.js`: Pornhub, 85po, TokyoMotion (hidden `twivideo` and the disabled TwiKeep and Twihozon keep their registry positions in the API but are not shown). Automatic switching after a failure follows the same order.
 
 Thumbnails load straight from the CDN with `referrerpolicy=no-referrer`. If that image fails, that source's posters fall back to `/proxy/media`. Set `SOURCE_THUMBS_85PO=proxy` (or `direct`) to skip the probe. A source whose ranking keeps failing is removed from the switcher (`hideFailedSources`, default on, after `hideAfterFailures` consecutive failures, default 3; a block page counts as one failure like any other). A hidden source comes back after `hiddenRetryMs` (default 10 minutes, `HIDDEN_RETRY_MS`); one success clears its record, one more failure hides it again. `HIDE_FAILED_SOURCES=0` keeps every tab. When a ranking fails the feed moves to the next source that is neither hidden nor already failed, and the note bar says why; when none is left it stops and shows a retry button. TwiKeep takes `/api/videos?metric=downloads|views` (the bottom bar has a 保存数/表示数 toggle), and each metric is cached separately.
 
