@@ -170,6 +170,7 @@ function playbackConfig() {
         fullProxyEnabled: global.fullProxyEnabled,
         maxProxyStreams: global.maxProxyStreams,
         sources: Object.fromEntries(adapters.map((adapter) => [adapter.id, mirrors.playbackModeFor(adapter.id)])),
+        startOffsets: Object.fromEntries(adapters.map((adapter) => [adapter.id, mirrors.startOffsetFor(adapter.id)])),
         thumbs: Object.fromEntries(adapters.map((adapter) => {
             const fromEnv = process.env[`SOURCE_THUMBS_${mirrors.envId(adapter.id)}`];
             const fromFile = (mirrors.sourceConfig(adapter.id).thumbs) || '';

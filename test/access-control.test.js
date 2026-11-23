@@ -110,6 +110,7 @@ test('with a password every route needs it, and the relay keeps its allowlist', 
     const port = await startServer(t, { BASIC_AUTH_USER: USER, BASIC_AUTH_PASS: PASS });
     const routes = ['/', '/index.html', '/sw.js', '/manifest.webmanifest', '/src/main.js', '/icons/icon-192.png',
         '/favicon.ico', '/api/status', '/api/sources', '/api/videos', '/api/resolve', '/api/external',
+        '/embed/pornhub?id=phTest&start=5', '/src/embed-player.js',
         '/proxy/media', '/proxy/playlist', RELAY, '/does-not-exist'];
     for (const route of routes) {
         const denied = await get(port, route);

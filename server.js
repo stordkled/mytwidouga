@@ -8,6 +8,7 @@ const { closeBrowser, status: browserStatus } = require('./lib/browser');
 const { staticPath } = require('./lib/static');
 const { createAccessControl } = require('./lib/auth');
 const { createTimingLog } = require('./src/feed-logic');
+const { servePornhubEmbed } = require('./lib/pornhub-embed');
 
 const PORT = process.env.PORT || 3000;
 const access = createAccessControl();
@@ -87,6 +88,11 @@ async function handle(req, res) {
     } catch {
         res.writeHead(400);
         res.end('Bad Request');
+        return;
+    }
+
+    if (url.pathname === '/embed/pornhub') {
+        await servePornhubEmbed(req, res, url);
         return;
     }
 

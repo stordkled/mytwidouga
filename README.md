@@ -150,6 +150,7 @@ Edit `config/sources.json`, or override it without a code change:
 | `SOURCE_METRIC_TWIKEEP` | `downloads` (default, saves) or `views`. Same as `"metric"` under `twikeep` in the JSON. |
 | `SOURCE_HIDDEN_TWIVIDEO` | `1`/`0` overrides `"hidden"` for one source. Hidden sources stay in the API but not in the switcher. |
 | `SOURCE_ENABLED_TWIKEEP` | `1`/`0` overrides `"enabled"` for one source. Same pattern for `TWIHOZON` and the others. |
+| `SOURCE_START_OFFSET_PORNHUB` | Seconds a video starts and loops back to. Overrides `"startOffsetSec"` for that source (Pornhub 5, others 0); `0` turns it off. A video no longer than the offset starts at 0. The seek bar can still go before it. Pornhub's embed fallback also starts at the offset: a local player uses the existing relay when enabled. With `FULL_PROXY=0`, it selects media that can play without a Referer or server IP binding and loads it directly (HLS also needs CDN CORS support). Videos exposing only relay-dependent media cannot play in this mode. |
 | `BROWSER_IDLE_MS` | Headless Chrome (if a source uses it) is closed after this long without a page. Default 5 minutes. |
 
 `config/sources.json` is re-read when its modification time changes (checked at most every 2 seconds), so edits apply without a restart. `GET /api/status` includes `domains.<id>.active`, `expiresAt`, `candidates`, the playback settings, and `proxy` (`activeStreams`, `waiting`, `clients`).

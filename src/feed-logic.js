@@ -793,7 +793,25 @@
         return info && info.canSeek ? 'active' : 'disabled';
     }
 
+    // ---- Start offset (開始位置) ---------------------------------------------
+    // The per-source offset from /api/sources; anything unusable is 0.
+    function startOffsetFor(config, sourceId) {
+        const value = config && config.startOffsets ? config.startOffsets[sourceId] : 0;
+        return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+    }
+
+    // Where a video starts and loops back to. A clip no longer than the offset
+    // starts at 0; any longer clip starts at the offset. Unknown or live
+    // durations also start at 0.
+    function startPosition(offset, duration) {
+        if (!(offset > 0) || !Number.isFinite(offset)) return 0;
+        if (typeof duration !== 'number' || !Number.isFinite(duration)) return 0;
+        return duration > offset ? offset : 0;
+    }
+
     return {
+        startOffsetFor,
+        startPosition,
         formatTime,
         seekInfo,
         seekRatio,

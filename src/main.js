@@ -622,6 +622,22 @@ function createVideoCard(video, index) {
         }
         if (media.getAttribute('poster')) media.removeAttribute('poster');
     });
+    // Start offset: one seek per loaded resource, for every <video> step
+    // (file, hls.js, native HLS, relay). `emptied` marks a new resource. No
+    // later event re-applies it, so a manual seek into 0..offset stays put.
+    const startAt = () => Logic.startPosition(Logic.startOffsetFor(playbackConfig, cardSource.id), media.duration);
+    let startPending = true;
+    const applyStartOffset = () => {
+        if (!startPending || media.readyState < 1 || Number.isNaN(media.duration)) return;
+        startPending = false;
+        const target = startAt();
+        if (target > 0 && media.currentTime < target) seekMedia(media, target);
+    };
+    media.addEventListener('emptied', () => {
+        startPending = true;
+    });
+    media.addEventListener('loadedmetadata', applyStartOffset);
+    media.addEventListener('durationchange', applyStartOffset);
     media.addEventListener('ended', () => {
         if (media.dataset.rewinding === '1') return;
         if (!Number.isFinite(media.duration) || media.duration < 1) return;
@@ -634,7 +650,7 @@ function createVideoCard(video, index) {
         };
         media.addEventListener('seeked', resume, { once: true });
         try {
-            media.currentTime = 0;
+            media.currentTime = startAt();
         } catch {
             media.dataset.rewinding = '';
         }
@@ -1002,6 +1018,12 @@ function playbackState() {
 }
 
 function mountEmbed(card, embedUrl) {
+    const video = videos[Number(card.dataset.index)];
+    const sourceId = video && sourceOf(video);
+    const offset = Logic.startOffsetFor(playbackConfig, sourceId);
+    if (sourceId === 'pornhub' && offset > 0) {
+        embedUrl = `/embed/pornhub?id=${encodeURIComponent(video.id)}&start=${offset}`;
+    }
     const wrapper = card.querySelector('.video-wrapper');
     const media = wrapper.querySelector('video');
     if (media) media.style.display = 'none';
@@ -1015,7 +1037,7 @@ function mountEmbed(card, embedUrl) {
         frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation');
         wrapper.appendChild(frame);
     }
-    if (frame.src !== embedUrl) frame.src = embedUrl;
+    if (frame.getAttribute('src') !== embedUrl) frame.src = embedUrl;
     card.classList.add('embed-shield');
     card.classList.remove('embed-interactive');
     const overlay = card.querySelector('.play-pause-overlay');
@@ -1393,6 +1415,9 @@ function preloadCard(index, offset) {
         if (!bookmarkMode && (!currentSource || currentSource.id !== sourceId)) return;
         if (!playback) return;
         if (forced === 'embed' || playback.kind === 'embed') {
+            // An offset iframe must start when it becomes visible, not play
+            // past the initial five seconds while the previous card is shown.
+            if (sourceId === 'pornhub' && Logic.startOffsetFor(playbackConfig, sourceId) > 0) return;
             const embedUrl = playback.embedUrl || playback.url || video.playback.embedUrl;
             if (offset === 1 && embedUrl && !card.querySelector('iframe.embed-player')) {
                 mountEmbed(card, embedUrl);
