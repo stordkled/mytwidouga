@@ -77,7 +77,7 @@ function noteSourceResult(sourceId, ok, message, now = Date.now()) {
 }
 
 function sourceHidden(sourceId, now = Date.now()) {
-    if (mirrors.hiddenFor(sourceId)) return true;
+    if (!mirrors.enabledFor(sourceId) || mirrors.hiddenFor(sourceId)) return true;
     if (!mirrors.settings().hideFailedSources) return false;
     const record = sourceFailures.get(sourceId);
     if (!record || !record.hiddenUntil) return false;
@@ -149,12 +149,13 @@ function publicSource(adapter) {
         id: adapter.id,
         name: adapter.name,
         color: adapter.color || '#ffffff',
+        enabled: mirrors.enabledFor(adapter.id),
         hidden: sourceHidden(adapter.id),
         periods: adapter.periods.map((period) => ({ id: period.id, label: period.label })),
     };
     // Hidden only for a while (failure streak, not config): tell the client
     // so an open page re-checks /api/sources and shows it again later.
-    if (out.hidden && !mirrors.hiddenFor(adapter.id)) out.retryLater = true;
+    if (out.enabled && out.hidden && !mirrors.hiddenFor(adapter.id)) out.retryLater = true;
     if (Array.isArray(adapter.metrics) && adapter.metrics.length > 1) {
         out.metrics = adapter.metrics.map((metric) => ({ id: metric.id, label: metric.label }));
         out.defaultMetric = metricFor(adapter, '');
@@ -169,6 +170,7 @@ function playbackConfig() {
         fullProxyEnabled: global.fullProxyEnabled,
         maxProxyStreams: global.maxProxyStreams,
         sources: Object.fromEntries(adapters.map((adapter) => [adapter.id, mirrors.playbackModeFor(adapter.id)])),
+        startOffsets: Object.fromEntries(adapters.map((adapter) => [adapter.id, mirrors.startOffsetFor(adapter.id)])),
         thumbs: Object.fromEntries(adapters.map((adapter) => {
             const fromEnv = process.env[`SOURCE_THUMBS_${mirrors.envId(adapter.id)}`];
             const fromFile = (mirrors.sourceConfig(adapter.id).thumbs) || '';
@@ -187,6 +189,10 @@ function decoratePlayback(playback) {
 
 function list() {
     return adapters.map(publicSource);
+}
+
+function disabledIds() {
+    return adapters.filter((adapter) => !mirrors.enabledFor(adapter.id)).map((adapter) => adapter.id);
 }
 
 function get(id) {
@@ -228,6 +234,26 @@ async function fetchRanking(sourceId, requestedPeriod, options = {}) {
     }
     const resolved = resolvePeriod(adapter.periods, requestedPeriod);
     const metric = metricFor(adapter, options.metric);
+    // Checked before the cache: a disabled source serves no board at all and
+    // does not count as a failure.
+    if (!mirrors.enabledFor(adapter.id)) {
+        const disabled = {
+            ok: false,
+            cached: false,
+            disabled: true,
+            source: publicSource(adapter),
+            period: { id: resolved.period.id, label: resolved.period.label },
+            requestedPeriod: resolved.requestedPeriod,
+            fallback: false,
+            fallbackReason: null,
+            error: `${adapter.name} は設定で無効になっています`,
+            reason: 'disabled',
+            hidden: true,
+            videos: [],
+        };
+        if (metric) disabled.metric = metric;
+        return disabled;
+    }
     const cacheKey = rankingCacheKey(adapter.id, resolved.period.id, metric);
     const ttl = adapter.cacheTtlMs || mirrors.settings().cacheTtlMs;
     const timeout = adapter.timeoutMs || mirrors.settings().requestTimeoutMs;
@@ -364,6 +390,7 @@ async function lookupExternal(sourceId, videoId) {
 
 module.exports = {
     list,
+    disabledIds,
     get,
     proxyView,
     domainStatus,

@@ -2,6 +2,13 @@ node_modules
 npm-debug.log
 .git
 .gitignore
+.gitattributes
+.bridge
 .env
-package-lock.json
-
+.env.*
+Dockerfile
+.dockerignore
+docker-compose.yml
+Caddyfile
+README.md
+test

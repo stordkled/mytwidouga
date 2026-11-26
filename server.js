@@ -6,9 +6,12 @@ const { proxyMedia, proxyStatus } = require('./lib/proxy');
 const mirrors = require('./lib/mirrors');
 const { closeBrowser, status: browserStatus } = require('./lib/browser');
 const { staticPath } = require('./lib/static');
+const { createAccessControl } = require('./lib/auth');
 const { createTimingLog } = require('./src/feed-logic');
+const { servePornhubEmbed } = require('./lib/pornhub-embed');
 
 const PORT = process.env.PORT || 3000;
+const access = createAccessControl();
 
 // Rolling server-side timings per source and stage, read from /api/status.
 // Only registered source ids are recorded, so a request cannot add labels.
@@ -29,6 +32,8 @@ const MIME = {
     '.ico': 'image/x-icon',
     '.svg': 'image/svg+xml',
     '.webmanifest': 'application/manifest+json',
+    '.txt': 'text/plain; charset=utf-8',
+    '.xml': 'application/xml; charset=utf-8',
 };
 
 function sendJson(res, status, body) {
@@ -78,6 +83,7 @@ const server = http.createServer((req, res) => {
 
 async function handle(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
+    if (!access.guard(req, res)) return;
     let url;
     try {
         url = new URL(req.url, `http://localhost:${PORT}`);
@@ -87,10 +93,16 @@ async function handle(req, res) {
         return;
     }
 
+    if (url.pathname === '/embed/pornhub') {
+        await servePornhubEmbed(req, res, url);
+        return;
+    }
+
     if (url.pathname === '/api/status') {
         sendJson(res, 200, {
             browser: browserStatus(),
             sources: sources.list(),
+            disabledSources: sources.disabledIds(),
             domains: sources.domainStatus(),
             playback: sources.playbackConfig(),
             proxy: proxyStatus(),
@@ -194,7 +206,8 @@ async function handle(req, res) {
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n  TWIVIDEO Shorts`);
     console.log(`  Local:   http://localhost:${PORT}/`);
-    console.log(`  Sources: ${sources.list().map((source) => source.id).join(', ')}`);
+    console.log(`  Sources: ${sources.list().filter((source) => source.enabled).map((source) => source.id).join(', ')}`);
+    console.log(`  Access:  ${access.enabled ? 'password required' : 'open (BASIC_AUTH_PASS is not set)'}`);
     console.log('  Browser launches on demand.\n');
 });
 

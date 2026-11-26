@@ -16,7 +16,9 @@ const STORAGE_BOOKMARKS = 'shorts.bookmarks';
 const STORAGE_ORDER = 'shorts.order';
 const STORAGE_LADDER = 'shorts.ladder';
 const STORAGE_BOOT = 'shorts.boot';
+const STORAGE_BOOKMARK_ORDER = 'shorts.bookmarkOrder';
 const Logic = window.FeedLogic;
+const sourceToast = document.getElementById('sourceToast');
 
 // localStorage itself can throw (storage disabled, private mode).
 function bookmarkStorage() {
@@ -61,6 +63,8 @@ let feedGeneration = 0;
 let bookmarks = Logic.loadBookmarks(bookmarkStorage(), STORAGE_BOOKMARKS);
 // True while the feed shows the いいね一覧 instead of a ranking.
 let bookmarkMode = false;
+// いいね一覧: 'list' (newest first) or 'random' (uniform shuffle of all likes).
+let bookmarkOrder = Logic.pickBookmarkOrder(readSetting(STORAGE_BOOKMARK_ORDER));
 
 let sources = [];
 let currentSource = null;
@@ -251,11 +255,7 @@ function renderSourceBar() {
                 return;
             }
             if (source.id === currentSource.id) return;
-            failedChain.clear();
-            selectSource(source, true);
-            renderSourceBar();
-            renderPeriodBar();
-            loadVideos();
+            switchToSource(source);
         });
         sourceBar.appendChild(button);
     });
@@ -275,9 +275,51 @@ function renderSourceBar() {
     sourceBar.appendChild(bookmarkButton);
 }
 
+// The user picked a site (bar button, swipe or Shift+←/→): saved as
+// shorts.source, then the usual bar / period bar / load flow.
+function switchToSource(source) {
+    failedChain.clear();
+    selectSource(source, true);
+    renderSourceBar();
+    renderPeriodBar();
+    loadVideos();
+}
+
+// Swipe / Shift+←→: the next (step 1) or previous (step -1) site among the
+// ones the bar offers (disabled and hidden ones are skipped), looping at the
+// ends. Not in the いいね一覧, where the swipe only moves between videos.
+function switchSourceBy(step) {
+    if (bookmarkMode || !currentSource) return false;
+    const target = Logic.stepSource(visibleSources(), currentSource.id, step);
+    if (!target || target.id === currentSource.id) return false;
+    switchToSource(target);
+    const active = sourceBar.querySelector('.source-btn.active');
+    if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    showToast(target.name);
+    return true;
+}
+
+// A short label over the feed (the note bar stays for fallback reasons).
+let toastTimer = null;
+
+function showToast(text) {
+    if (!sourceToast) return;
+    sourceToast.textContent = text;
+    sourceToast.classList.add('visible');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+        sourceToast.classList.remove('visible');
+        toastTimer = null;
+    }, 1200);
+}
+
 function updateBookmarkCount() {
     const label = sourceBar.querySelector('.bookmark-entry span');
     if (label) label.textContent = `ブクマ ${bookmarks.length}`;
+    const navLabel = bottomNav.querySelector('.bookmark-nav span');
+    if (navLabel) navLabel.textContent = `ブクマ ${bookmarks.length}`;
+    const listLabel = bottomNav.querySelector('.bookmark-list-btn span');
+    if (listLabel) listLabel.textContent = `一覧 ${bookmarks.length}`;
 }
 
 // Persist the in-memory list. A full or broken localStorage never throws
@@ -390,7 +432,13 @@ function appendCards() {
     setupEventListeners(added);
 }
 
-async function openBookmarks() {
+// `order` ('list' / 'random') switches the いいね一覧 mode and is saved;
+// without it the saved mode is used. Opening 'random' again reshuffles.
+async function openBookmarks(order) {
+    if (order) {
+        bookmarkOrder = Logic.pickBookmarkOrder(order);
+        writeSetting(STORAGE_BOOKMARK_ORDER, bookmarkOrder);
+    }
     stopRankingLoad();
     bookmarkMode = true;
     // Pick up likes made in another tab.
@@ -400,9 +448,17 @@ async function openBookmarks() {
     stopAll();
     setFallbackNote('');
     videos = Logic.bookmarkVideos(bookmarks);
+    const total = videos.length;
+    // ランダム再生: every like from any source (disabled ones included),
+    // shuffled evenly; entries with nothing to play are left out.
+    if (bookmarkOrder === 'random') videos = Logic.orderBookmarkVideos(videos, 'random');
     if (videos.length === 0) {
         setLoading(false);
-        showMessage('まだいいねした動画はありません', 'フィードで ♥ を押すと、ここからあとで見返せます', exitBookmarks, {
+        const title = total === 0 ? 'まだいいねした動画はありません' : '再生できるいいねがありません';
+        const text = total === 0
+            ? 'フィードで ♥ を押すと、ここからあとで見返せます'
+            : '「一覧」から確認して ♥ で解除できます';
+        showMessage(title, text, exitBookmarks, {
             buttonText: 'ランキングに戻る',
             icon: 'fa-heart',
         });
@@ -451,13 +507,11 @@ function renderPeriodBar() {
         back.className = 'nav-btn back-to-ranking';
         back.innerHTML = '<i class="fas fa-arrow-left"></i><span></span>';
         back.querySelector('span').textContent = currentSource ? `${currentSource.name} ランキングに戻る` : 'ランキングに戻る';
+        back.title = back.querySelector('span').textContent;
         back.addEventListener('click', exitBookmarks);
-        const label = document.createElement('button');
-        label.type = 'button';
-        label.className = 'nav-btn active';
-        label.disabled = true;
-        label.innerHTML = '<i class="fas fa-heart"></i><span>いいね一覧</span>';
-        bottomNav.append(back, label);
+        const list = bookmarkOrderButton('list', 'fa-list', `一覧 ${bookmarks.length}`, 'いいねした動画を新しい順に再生');
+        const random = bookmarkOrderButton('random', 'fa-shuffle', 'ランダム再生', 'いいねした動画をシャッフルして再生（もう一度押すと再シャッフル）');
+        bottomNav.append(back, list, random);
         return;
     }
     currentSource.periods.forEach((period) => {
@@ -494,6 +548,33 @@ function renderPeriodBar() {
         bottomNav.appendChild(button);
     }
     bottomNav.appendChild(orderButton());
+    // The いいね一覧 entry next to the periods (the header one stays too).
+    const bookmarkNav = document.createElement('button');
+    bookmarkNav.type = 'button';
+    bookmarkNav.className = 'nav-btn bookmark-nav';
+    bookmarkNav.title = 'いいね一覧';
+    bookmarkNav.innerHTML = '<i class="fas fa-heart"></i><span></span>';
+    bookmarkNav.querySelector('span').textContent = `ブクマ ${bookmarks.length}`;
+    bookmarkNav.addEventListener('click', () => openBookmarks());
+    bottomNav.appendChild(bookmarkNav);
+}
+
+// 一覧 / ランダム再生 in the いいね一覧. 一覧 again does nothing; ランダム再生
+// again reshuffles.
+function bookmarkOrderButton(order, icon, text, title) {
+    const active = bookmarkOrder === order;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `nav-btn bookmark-${order}-btn` + (active ? ' active' : '');
+    button.title = title;
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    button.innerHTML = `<i class="fas ${icon}"></i><span></span>`;
+    button.querySelector('span').textContent = text;
+    button.addEventListener('click', () => {
+        if (active && order === 'list') return;
+        openBookmarks(order);
+    });
+    return button;
 }
 
 // ランダム ⇄ ランキング順. Saved per browser; the いいね一覧 is not affected.
@@ -622,6 +703,22 @@ function createVideoCard(video, index) {
         }
         if (media.getAttribute('poster')) media.removeAttribute('poster');
     });
+    // Start offset: one seek per loaded resource, for every <video> step
+    // (file, hls.js, native HLS, relay). `emptied` marks a new resource. No
+    // later event re-applies it, so a manual seek into 0..offset stays put.
+    const startAt = () => Logic.startPosition(Logic.startOffsetFor(playbackConfig, cardSource.id), media.duration);
+    let startPending = true;
+    const applyStartOffset = () => {
+        if (!startPending || media.readyState < 1 || Number.isNaN(media.duration)) return;
+        startPending = false;
+        const target = startAt();
+        if (target > 0 && media.currentTime < target) seekMedia(media, target);
+    };
+    media.addEventListener('emptied', () => {
+        startPending = true;
+    });
+    media.addEventListener('loadedmetadata', applyStartOffset);
+    media.addEventListener('durationchange', applyStartOffset);
     media.addEventListener('ended', () => {
         if (media.dataset.rewinding === '1') return;
         if (!Number.isFinite(media.duration) || media.duration < 1) return;
@@ -634,7 +731,7 @@ function createVideoCard(video, index) {
         };
         media.addEventListener('seeked', resume, { once: true });
         try {
-            media.currentTime = 0;
+            media.currentTime = startAt();
         } catch {
             media.dataset.rewinding = '';
         }
@@ -1002,6 +1099,12 @@ function playbackState() {
 }
 
 function mountEmbed(card, embedUrl) {
+    const video = videos[Number(card.dataset.index)];
+    const sourceId = video && sourceOf(video);
+    const offset = Logic.startOffsetFor(playbackConfig, sourceId);
+    if (sourceId === 'pornhub' && offset > 0) {
+        embedUrl = `/embed/pornhub?id=${encodeURIComponent(video.id)}&start=${offset}`;
+    }
     const wrapper = card.querySelector('.video-wrapper');
     const media = wrapper.querySelector('video');
     if (media) media.style.display = 'none';
@@ -1015,7 +1118,7 @@ function mountEmbed(card, embedUrl) {
         frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation');
         wrapper.appendChild(frame);
     }
-    if (frame.src !== embedUrl) frame.src = embedUrl;
+    if (frame.getAttribute('src') !== embedUrl) frame.src = embedUrl;
     card.classList.add('embed-shield');
     card.classList.remove('embed-interactive');
     const overlay = card.querySelector('.play-pause-overlay');
@@ -1393,6 +1496,9 @@ function preloadCard(index, offset) {
         if (!bookmarkMode && (!currentSource || currentSource.id !== sourceId)) return;
         if (!playback) return;
         if (forced === 'embed' || playback.kind === 'embed') {
+            // An offset iframe must start when it becomes visible, not play
+            // past the initial five seconds while the previous card is shown.
+            if (sourceId === 'pornhub' && Logic.startOffsetFor(playbackConfig, sourceId) > 0) return;
             const embedUrl = playback.embedUrl || playback.url || video.playback.embedUrl;
             if (offset === 1 && embedUrl && !card.querySelector('iframe.embed-player')) {
                 mountEmbed(card, embedUrl);
@@ -1473,17 +1579,21 @@ function updateAllMuteState() {
 }
 
 function bindEmbedShield(overlay) {
+    let startX = 0;
     let startY = 0;
     let lastY = 0;
     let moved = false;
     overlay.addEventListener('pointerdown', (event) => {
         if (!overlay.closest('.embed-shield')) return;
+        startX = event.clientX;
         startY = lastY = event.clientY;
         moved = false;
         overlay.setPointerCapture(event.pointerId);
     });
     overlay.addEventListener('pointermove', (event) => {
         if (!overlay.closest('.embed-shield')) return;
+        // A sideways swipe (source switch) is not a tap on the player.
+        if (Math.abs(event.clientX - startX) > 10) moved = true;
         const dy = event.clientY - lastY;
         if (Math.abs(event.clientY - startY) > 10) {
             moved = true;
@@ -1680,7 +1790,7 @@ async function loadVideos(options = {}) {
                 renderPeriodBar();
                 setLoading(false);
                 isLoading = false;
-                loadVideos({ note: Logic.switchNote(source.name, next.name, data.reason, !!data.hidden) });
+                loadVideos({ note: Logic.switchNote(source.name, next.name, data.reason, !!data.hidden && !data.disabled) });
                 return;
             }
             // Nothing left that has not failed: stop here (no more requests
@@ -1720,7 +1830,49 @@ async function loadVideos(options = {}) {
     }
 }
 
+// Sideways swipe on the feed: left = next site, right = previous site. The
+// feed only pans vertically (touch-action: pan-y), so a vertical swipe makes
+// the browser cancel this pointer and scroll to the next video instead. The
+// seek bar stops its own pointerdown, so a seek drag never gets here.
+let swipeStart = null;
+
+videoFeed.addEventListener('pointerdown', (event) => {
+    swipeStart = null;
+    if (event.pointerType === 'mouse' || event.isPrimary === false) return;
+    const target = event.target;
+    if (target && target.closest && target.closest('.video-seek, .embed-exit, .error-state button')) return;
+    swipeStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+});
+videoFeed.addEventListener('pointerup', (event) => {
+    const start = swipeStart;
+    swipeStart = null;
+    if (!start || event.pointerId !== start.pointerId || bookmarkMode) return;
+    const direction = Logic.swipeSourceDirection(event.clientX - start.x, event.clientY - start.y);
+    if (!direction) return;
+    // A swipe never counts toward a double-tap like.
+    lastTapTime = 0;
+    switchSourceBy(direction === 'next' ? 1 : -1);
+});
+videoFeed.addEventListener('pointercancel', () => {
+    swipeStart = null;
+});
+
+function typingTarget(target) {
+    if (!target) return false;
+    if (target.isContentEditable) return true;
+    return /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || '');
+}
+
 document.addEventListener('keydown', (event) => {
+    // Shift+←/→ switches the site (← previous, → next, looping); plain ←/→
+    // still seeks below.
+    if (event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey
+        && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+        if (typingTarget(event.target) || bookmarkMode) return;
+        event.preventDefault();
+        switchSourceBy(event.key === 'ArrowLeft' ? -1 : 1);
+        return;
+    }
     if (event.key === 'ArrowDown' || event.key === 'j') {
         event.preventDefault();
         const next = cardAt(currentVideoIndex + 1);
@@ -1761,11 +1913,11 @@ async function init() {
         sources = data.sources || [];
         sourcesRefreshedAt = Date.now();
         playbackConfig = data.playback || playbackConfig;
-        if (sources.length === 0) throw new Error('ソースがありません');
+        if (Logic.barSources(sources).length === 0) throw new Error('ソースがありません');
         const saved = localStorage.getItem(STORAGE_SOURCE);
-        // A source the server no longer has (a removed adapter) is
-        // forgotten, so this browser opens on the default from now on.
-        if (saved && !sources.some((source) => source.id === saved)) {
+        // A source the server no longer has (a removed adapter) or has
+        // disabled is forgotten, so this browser opens on the default.
+        if (saved && !sources.some((source) => source.id === saved && source.enabled !== false)) {
             localStorage.removeItem(STORAGE_SOURCE);
         }
         // A source hidden in config/sources.json is not offered, even if it

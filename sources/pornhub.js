@@ -296,8 +296,18 @@ function choosePlayable(file, hls) {
     return hls || null;
 }
 
-async function candidatePlays(media, referer) {
+async function candidatePlays(media, referer, { directOnly = false } = {}) {
     try {
+        if (directOnly) {
+            // A server-bound URL cannot be used by a viewer on another IP.
+            // Probe the same no-referrer path that the local iframe will use.
+            if (urlIsIpBound(media.url)) return false;
+            const plays = media.kind === 'hls'
+                ? await hlsPlays(media.url, '')
+                : await fileStarts(media.url, '');
+            if (plays) media.needsReferer = false;
+            return plays;
+        }
         if (media.kind === 'hls') {
             const plays = await hlsPlays(media.url, referer);
             // Segments 404 without the watch-page Referer, so the viewer's
@@ -328,11 +338,11 @@ async function candidatePlays(media, referer) {
 
 const RESOLVE_ATTEMPTS = 4;
 
-async function findPlayable(base, id) {
-    const pageUrl = `${base}/view_video.php?viewkey=${id}`;
+async function findPlayable(base, id, embedUrl = '', { directOnly = false } = {}) {
+    const pageUrl = embedUrl || `${base}/view_video.php?viewkey=${id}`;
     const referer = `${base}/`;
     let cookie = PAGE_HEADERS.Cookie;
-    for (let attempt = 0; attempt < RESOLVE_ATTEMPTS; attempt += 1) {
+    for (let attempt = 0; attempt < (embedUrl ? 1 : RESOLVE_ATTEMPTS); attempt += 1) {
         const response = await getText(pageUrl, {
             timeout: 12000,
             headers: { ...PAGE_HEADERS, Cookie: cookie },
@@ -353,7 +363,7 @@ async function findPlayable(base, id) {
             for (const media of options) {
                 if (media.kind !== 'file') {
                     hlsOptions.push(media);
-                } else if (await candidatePlays(media, referer)) {
+                } else if (await candidatePlays(media, referer, { directOnly })) {
                     file = media;
                     break;
                 }
@@ -365,7 +375,7 @@ async function findPlayable(base, id) {
                     if (probedShort) continue;
                     probedShort = true;
                 }
-                if (await candidatePlays(media, referer)) {
+                if (await candidatePlays(media, referer, { directOnly })) {
                     hls = media;
                     break;
                 }
@@ -380,12 +390,26 @@ async function findPlayable(base, id) {
     return null;
 }
 
-function getEmbedUrl(video) {
+function getEmbedUrl(video, base = currentBase()) {
     const template = embedTemplateFor('pornhub');
-    const base = currentBase();
     if (template) return fillTemplate(template, video, base);
     if (!video || !/^[a-zA-Z0-9]+$/.test(String(video.id || ''))) return null;
     return `${base}/embed/${video.id}`;
+}
+
+// The watch page can be blocked while the embed still exposes playable
+// media. Reuse its resolver/probes for the offset-aware iframe player.
+async function resolveEmbedPlayback(id, { directOnly = false } = {}) {
+    if (!/^[a-zA-Z0-9]{1,80}$/.test(id)) throw new Error('Invalid Pornhub video id');
+    // Watch-page failures can clear the remembered regional base before this
+    // request arrives. Try the configured mirrors again for the embed itself.
+    const { result } = await withMirror('pornhub', DEFAULT_BASES, async (base) => {
+        const embedUrl = getEmbedUrl({ id }, base);
+        const media = await findPlayable(new URL(embedUrl).origin, id, embedUrl, { directOnly });
+        if (!media) throw new Error('No playable media in Pornhub embed');
+        return media;
+    });
+    return result;
 }
 
 async function fetchRanking(periodId) {
@@ -446,6 +470,7 @@ module.exports = {
     timeoutMs: 60000,
     fetchRanking,
     resolvePlayback,
+    resolveEmbedPlayback,
     getEmbedUrl,
     parseListing,
     listingIsRanking,

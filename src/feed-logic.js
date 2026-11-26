@@ -31,9 +31,10 @@
 
     // Sources for the switcher: the non-hidden ones, plus the current one so
     // the user can see where they are. If every source is hidden, show all
-    // (the user may still pick one by hand).
+    // (the user may still pick one by hand). A source disabled in config is
+    // never offered, not even as the current one.
     function barSources(sources, currentId) {
-        const all = sources || [];
+        const all = (sources || []).filter((source) => source.enabled !== false);
         // Only the current one (or nothing) left visible: that is "every
         // source hidden" from the user's point of view, so offer them all.
         if (!all.some((source) => !source.hidden)) return all.slice();
@@ -62,7 +63,12 @@
         return (sources || []).map((source) => {
             const update = byId.get(source.id);
             if (!update) return source;
-            return { ...source, hidden: Boolean(update.hidden), retryLater: Boolean(update.retryLater) };
+            return {
+                ...source,
+                enabled: update.enabled !== false,
+                hidden: Boolean(update.hidden),
+                retryLater: Boolean(update.retryLater),
+            };
         });
     }
 
@@ -81,7 +87,7 @@
     function fallbackSource(sources, currentId, failedIds) {
         const failed = failedIds instanceof Set ? failedIds : new Set(failedIds || []);
         return (sources || []).find((source) => (
-            source.id !== currentId && !source.hidden && !failed.has(source.id)
+            source.id !== currentId && source.enabled !== false && !source.hidden && !failed.has(source.id)
         )) || null;
     }
 
@@ -91,6 +97,7 @@
         empty: 'ランキングが空でした',
         http: 'サイトがエラーを返しました',
         error: '読み込みに失敗しました',
+        disabled: '設定で無効になっています',
     };
 
     function reasonText(reason) {
@@ -504,6 +511,82 @@
         }));
     }
 
+    // ---- いいね一覧: 一覧 / ランダム再生 -------------------------------------
+    // "list" plays the likes newest first (as before); "random" plays every
+    // like, from any source, in a plain uniform shuffle (not the weighted
+    // ranking order). Anything else stored is "list".
+    const BOOKMARK_ORDERS = ['list', 'random'];
+    const DEFAULT_BOOKMARK_ORDER = 'list';
+
+    function pickBookmarkOrder(saved) {
+        return BOOKMARK_ORDERS.includes(saved) ? saved : DEFAULT_BOOKMARK_ORDER;
+    }
+
+    // Can the playback ladder try this video at all? A "resolve" one asks the
+    // server by source + id (that works for disabled sources too); the others
+    // need a media URL or an embed URL. Whether it really plays is found out
+    // when it plays (a failure skips to the next card).
+    function bookmarkPlayable(video) {
+        const playback = video && video.playback;
+        if (!playback || video.id == null || video.id === '') return false;
+        if (playback.kind === 'resolve') return true;
+        return Boolean(playback.url || playback.embedUrl);
+    }
+
+    // Fisher–Yates: every order equally likely. `rng` returns [0, 1).
+    function shuffleList(items, rng) {
+        const random = typeof rng === 'function' ? rng : Math.random;
+        const list = Array.isArray(items) ? items.slice() : [];
+        for (let i = list.length - 1; i > 0; i -= 1) {
+            let u = Number(random());
+            if (!(u >= 0)) u = 0;
+            if (u >= 1) u = 1 - Number.EPSILON;
+            const j = Math.floor(u * (i + 1));
+            [list[i], list[j]] = [list[j], list[i]];
+        }
+        return list;
+    }
+
+    // Feed videos from bookmarkVideos() in the chosen order. "random" leaves
+    // out entries that have nothing to play (they stay stored and are still
+    // in the 一覧, where they can be unliked) and renumbers the badges.
+    function orderBookmarkVideos(list, order, rng) {
+        const items = Array.isArray(list) ? list : [];
+        if (pickBookmarkOrder(order) !== 'random') return items.slice();
+        const shuffled = shuffleList(items.filter(bookmarkPlayable), rng);
+        return shuffled.map((video, index) => ({ ...video, rankLabel: `${index + 1}/${shuffled.length}` }));
+    }
+
+    // ---- Source switching by swipe / Shift+←→ ------------------------------
+    // The neighbour of `currentId` among `list` (the sources the bar offers),
+    // looping at both ends. `step` > 0 is the next one, < 0 the previous one.
+    // A current id not in the list starts from the first (next) or the last
+    // (previous). Null when there is nothing else to go to.
+    function stepSource(list, currentId, step) {
+        const items = Array.isArray(list) ? list.filter(Boolean) : [];
+        if (items.length === 0 || !step) return null;
+        const at = items.findIndex((source) => source.id === currentId);
+        if (at < 0) return step > 0 ? items[0] : items[items.length - 1];
+        if (items.length < 2) return null;
+        const move = step > 0 ? 1 : -1;
+        return items[(at + move + items.length) % items.length];
+    }
+
+    // A horizontal swipe is at least this long and clearly more sideways
+    // than up/down, so a vertical swipe (next video) or a tap never counts.
+    const SWIPE_MIN_PX = 60;
+    const SWIPE_RATIO = 1.8;
+
+    // Finger moved left (dx < 0) -> 'next', right -> 'prev', else null.
+    function swipeSourceDirection(dx, dy, options = {}) {
+        const minPx = options.minPx > 0 ? options.minPx : SWIPE_MIN_PX;
+        const ratio = options.ratio > 0 ? options.ratio : SWIPE_RATIO;
+        if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+        const ax = Math.abs(dx);
+        if (ax < minPx || ax < Math.abs(dy) * ratio) return null;
+        return dx < 0 ? 'next' : 'prev';
+    }
+
     // ---- Feed order (ランダム / ランキング順) ----------------------------------
     // "random" (default) plays each ranking in a weighted random order, so a
     // popular video tends to come early but a low one still shows up now and
@@ -786,7 +869,25 @@
         return info && info.canSeek ? 'active' : 'disabled';
     }
 
+    // ---- Start offset (開始位置) ---------------------------------------------
+    // The per-source offset from /api/sources; anything unusable is 0.
+    function startOffsetFor(config, sourceId) {
+        const value = config && config.startOffsets ? config.startOffsets[sourceId] : 0;
+        return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+    }
+
+    // Where a video starts and loops back to. A clip no longer than the offset
+    // starts at 0; any longer clip starts at the offset. Unknown or live
+    // durations also start at 0.
+    function startPosition(offset, duration) {
+        if (!(offset > 0) || !Number.isFinite(offset)) return 0;
+        if (typeof duration !== 'number' || !Number.isFinite(duration)) return 0;
+        return duration > offset ? offset : 0;
+    }
+
     return {
+        startOffsetFor,
+        startPosition,
         formatTime,
         seekInfo,
         seekRatio,
@@ -823,6 +924,16 @@
         removeBookmark,
         toggleBookmark,
         bookmarkVideos,
+        BOOKMARK_ORDERS,
+        DEFAULT_BOOKMARK_ORDER,
+        pickBookmarkOrder,
+        bookmarkPlayable,
+        shuffleList,
+        orderBookmarkVideos,
+        stepSource,
+        SWIPE_MIN_PX,
+        SWIPE_RATIO,
+        swipeSourceDirection,
         videosUrl,
         resolveUrl,
         barSources,

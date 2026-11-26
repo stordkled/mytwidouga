@@ -14,7 +14,119 @@ docker build -t shorts .
 docker run --rm -p 3000:3000 shorts
 ```
 
-The image is `ghcr.io/puppeteer/puppeteer`. Rankings are plain HTTP. A block page, timeout, 403, or 5xx tries the next domain in that source's list. This app does not solve Cloudflare challenges or reuse clearance cookies.
+The image is `node:22-bookworm-slim` and has no Chrome, because no source launches a browser at the moment. Rankings are plain HTTP. A block page, timeout, 403, or 5xx tries the next domain in that source's list. This app does not solve Cloudflare challenges or reuse clearance cookies.
+
+## VPSに置く手順
+
+友だちだけが見られるように、Ubuntu の VPS で動かす手順です。Caddy が HTTPS を担当し、アプリのコンテナはインターネットに直接公開しません。
+
+### 必要なもの
+
+| 項目 | 目安 |
+| --- | --- |
+| OS | Ubuntu 22.04 / 24.04 |
+| CPU / メモリ | 1 vCPU / 1GB で少人数は可能。余裕を見るなら 2 vCPU / 2GB |
+| ディスク | 10GB 以上の空き |
+| 転送量 | 中継再生は動画の通信がすべて VPS を通ります。1本 2〜5Mbps なら 1 時間で約 1〜2GB。転送量の上限を必ず確認してください |
+| ドメイン | A レコードを VPS の IP に向けたもの（HTTPS 証明書の取得に必要） |
+| 開放ポート | 22（SSH）、80、443（TCP）、443（UDP、任意） |
+
+これらは設計からの目安で、実際の VPS では計測していません。
+
+### 1. Docker を入れる
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl git
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+ファイアウォールは、SSH を先に許可してから有効にします。順番を間違えると接続できなくなります。
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw allow 443/udp
+sudo ufw enable
+```
+
+### 2. 取得して `.env` を作る
+
+```bash
+git clone <リポジトリのURL> shorts
+cd shorts
+openssl rand -hex 16   # 出力をパスワードとして使う
+touch .env
+chmod 600 .env
+nano .env              # 下の内容を書く
+```
+
+`.env` の内容です。`$` や `#` を含む値は単一引用符で囲みます。
+
+```dotenv
+DOMAIN=shorts.example.com
+BASIC_AUTH_USER=friend
+BASIC_AUTH_PASS=ここに生成したパスワード
+PORT=3000
+APP_MEMORY_LIMIT=512m
+```
+
+### 3. 起動する
+
+```bash
+sudo docker compose up -d --build
+sudo docker compose ps
+```
+
+`https://<DOMAIN>/` を開き、ユーザー名とパスワードを入れて動画が再生できれば完了です。友だちには URL とログイン情報を別々の経路で伝えてください。
+
+### 環境変数
+
+| 変数 | 必須 | 既定値 | 内容 |
+| --- | --- | --- | --- |
+| `DOMAIN` | Compose では必須 | なし | 公開するドメイン。 |
+| `BASIC_AUTH_PASS` | Compose では必須 | なし | 共有パスワード。ローカルで未設定ならログインなしで動きます。 |
+| `BASIC_AUTH_USER` | 任意 | `friend` | 共有ユーザー名。`:` は使えません。 |
+| `PORT` | 任意 | `3000` | コンテナ内でアプリが待ち受けるポート。外向きは常に 80/443 です。 |
+| `APP_MEMORY_LIMIT` | 任意 | `512m` | アプリのメモリ上限。 |
+| `TRUST_PROXY` | Compose が設定 | `1` | Caddy からの転送情報を信頼します。アプリを直接公開するときは設定しないでください。 |
+| `MAX_PROXY_STREAMS` など | 任意 | 下記参照 | 再生や中継の設定は「Domains, cache, and embeds」の表にあり、`.env` に書けば反映されます。 |
+
+ログインに成功すると 30 日間有効な Cookie が発行されます。同じ接続元から 10 回失敗すると、その接続元は最大 15 分間ログインできません。
+
+### 更新
+
+```bash
+cd shorts
+git pull
+sudo docker compose up -d --build
+sudo docker image prune -f
+```
+
+パスワードを変えるときは `.env` を編集して `sudo docker compose up -d` を実行します。全員のログインが解除されます。
+
+### ログと状態確認
+
+```bash
+sudo docker compose ps                 # 動作状況とヘルスチェック
+sudo docker compose logs -f app        # アプリのログ
+sudo docker compose logs -f caddy      # HTTPS 証明書や接続のログ
+curl -u friend https://<DOMAIN>/api/status   # パスワードを聞かれます
+```
+
+### 注意点
+
+- **再生できるサイトは家と変わることがあります。** データセンターの IP は配信元にブロックされやすく、一部のソースが表示されない場合があります。
+- **利用規約を確認してください。** アダルトコンテンツの中継を禁止している VPS があります。配信元サイトの規約と、利用者が成人であることも確認してください。
+- **`.env` は共有もコミットもしないでください。** `.gitignore` と `.dockerignore` で除外済みです。
+- **`docker compose down -v` は使わないでください。** 証明書のボリュームも消えます。停止だけなら `sudo docker compose down` です。
+- **Chrome はイメージに入っていません。** 今のソースは使っていません。将来必要になったら、Chrome を含むイメージに変更し `PUPPETEER_EXECUTABLE_PATH` を設定してください。
 
 ## Domains, cache, and embeds
 
@@ -37,13 +149,17 @@ Edit `config/sources.json`, or override it without a code change:
 | `TRUST_PROXY` | `1` keys the per-viewer cap on `X-Forwarded-For`. Only set this behind your own reverse proxy. |
 | `SOURCE_METRIC_TWIKEEP` | `downloads` (default, saves) or `views`. Same as `"metric"` under `twikeep` in the JSON. |
 | `SOURCE_HIDDEN_TWIVIDEO` | `1`/`0` overrides `"hidden"` for one source. Hidden sources stay in the API but not in the switcher. |
+| `SOURCE_ENABLED_TWIKEEP` | `1`/`0` overrides `"enabled"` for one source. Same pattern for `TWIHOZON` and the others. |
+| `SOURCE_START_OFFSET_PORNHUB` | Seconds a video starts and loops back to. Overrides `"startOffsetSec"` for that source (Pornhub 5, others 0); `0` turns it off. A video no longer than the offset starts at 0. The seek bar can still go before it. Pornhub's embed fallback also starts at the offset: a local player uses the existing relay when enabled. With `FULL_PROXY=0`, it selects media that can play without a Referer or server IP binding and loads it directly (HLS also needs CDN CORS support). Videos exposing only relay-dependent media cannot play in this mode. |
 | `BROWSER_IDLE_MS` | Headless Chrome (if a source uses it) is closed after this long without a page. Default 5 minutes. |
 
 `config/sources.json` is re-read when its modification time changes (checked at most every 2 seconds), so edits apply without a restart. `GET /api/status` includes `domains.<id>.active`, `expiresAt`, `candidates`, the playback settings, and `proxy` (`activeStreams`, `waiting`, `clients`).
 
 `twivideo` is `"hidden": true` in the shipped config: from this network it answers with a Cloudflare page, so it is not offered and the server does not probe it on every start.
 
-The switcher order is the order in `sources/index.js`: Pornhub, 85po, TwiKeep, TokyoMotion, Twihozon (hidden `twivideo` sits between 85po and TwiKeep in the API but is not shown). Automatic switching after a failure follows the same order.
+**TwiKeep and Twihozon are currently off** (`"enabled": false` in `config/sources.json`). They are not in the switcher or feed, and their rankings are not fetched. Saved bookmarks stay and can still play. `GET /api/status` lists them in `disabledSources`. To bring one back, remove that line or set `SOURCE_ENABLED_TWIKEEP=1` / `SOURCE_ENABLED_TWIHOZON=1`.
+
+The switcher order is the order in `sources/index.js`: Pornhub, 85po, TokyoMotion (hidden `twivideo` and the disabled TwiKeep and Twihozon keep their registry positions in the API but are not shown). Automatic switching after a failure follows the same order.
 
 Thumbnails load straight from the CDN with `referrerpolicy=no-referrer`. If that image fails, that source's posters fall back to `/proxy/media`. Set `SOURCE_THUMBS_85PO=proxy` (or `direct`) to skip the probe. A source whose ranking keeps failing is removed from the switcher (`hideFailedSources`, default on, after `hideAfterFailures` consecutive failures, default 3; a block page counts as one failure like any other). A hidden source comes back after `hiddenRetryMs` (default 10 minutes, `HIDDEN_RETRY_MS`); one success clears its record, one more failure hides it again. `HIDE_FAILED_SOURCES=0` keeps every tab. When a ranking fails the feed moves to the next source that is neither hidden nor already failed, and the note bar says why; when none is left it stops and shows a retry button. TwiKeep takes `/api/videos?metric=downloads|views` (the bottom bar has a 保存数/表示数 toggle), and each metric is cached separately.
 
@@ -102,13 +218,19 @@ Both Twitter sources start on the **direct** step (the Twitter CDN plays without
 
 None of the sites publish a 3-day board. Only TwiKeep has a 1年 board; asking another source for `period=1y` falls back to its month board. The old 3-day tab did not map to a twivideo ranking either. Asking for `period=3d` (or the legacy `sort=3days`) returns the nearest real board and sets `fallback` so the UI can say so. The period tabs themselves are the periods that source exports, so a month board shows up as 1ヶ月 / 月間 instead of a mislabeled week.
 
-**ランダム順（デフォルト）**: each ranking plays in a weighted random order (Efraimidis–Spirakis, `key = random^(1/weight)`, no repeats), reshuffled on every load or source/period/metric switch. The weight comes from saves (TwiKeep 保存数, Twihozon 保存) > likes > views > board rank, with "1.2K" / "12,345" / "1万" parsed, log-compressed, curved (squared, `WEIGHT_CURVE = 2`) so the popular end of a board comes up front clearly, and floored (`MIN_WEIGHT = 0.05`, about 1/20 of the top) so lower videos still turn up now and then. On a 24-video board ranked by position only, No.1 opens about 1 time in 5 and one of the top five about 6 times in 10, versus 1 in 24 and 5 in 24 for a plain shuffle; the bottom bar's ランダム/ランキング順 button switches back to the board order (`shorts.order` in `localStorage`). The ブクマ list is not shuffled. The logic lives in `src/feed-logic.js` (`orderFeed`, `appendFeed`, `feedWeights`). `/api/videos` serves a board 24 videos at a time (`&page=2`, `hasMore`); scrolling near the end fetches the next page, orders it the same way, and appends it without repeating a video already in the feed.
+**ランダム順（デフォルト）**: each ranking plays in a weighted random order (Efraimidis–Spirakis, `key = random^(1/weight)`, no repeats), reshuffled on every load or source/period/metric switch. The weight comes from saves (TwiKeep 保存数, Twihozon 保存) > likes > views > board rank, with "1.2K" / "12,345" / "1万" parsed, log-compressed, curved (squared, `WEIGHT_CURVE = 2`) so the popular end of a board comes up front clearly, and floored (`MIN_WEIGHT = 0.05`, about 1/20 of the top) so lower videos still turn up now and then. On a 24-video board ranked by position only, No.1 opens about 1 time in 5 and one of the top five about 6 times in 10, versus 1 in 24 and 5 in 24 for a plain shuffle; the bottom bar's ランダム/ランキング順 button switches back to the board order (`shorts.order` in `localStorage`). The ブクマ list never goes through this weighted order (its own ランダム再生 is a plain shuffle, below). The logic lives in `src/feed-logic.js` (`orderFeed`, `appendFeed`, `feedWeights`). `/api/videos` serves a board 24 videos at a time (`&page=2`, `hasMore`); scrolling near the end fetches the next page, orders it the same way, and appends it without repeating a video already in the feed.
 
 The last site and its period are stored in `localStorage`. A browser with nothing saved opens on Pornhub (`DEFAULT_SOURCE_ID` in `src/feed-logic.js`; the first offered source, normally 85po, if Pornhub is hidden). A saved site that is hidden or no longer exists falls back the same way; one the server no longer has (MissAV, for example) is also cleared from `localStorage`.
 
 **シークバー**: each card has a seek bar at the bottom with the current time and the length (`1:05 / 3:20`). Tap or drag it (touch or mouse) to jump; the seek happens on release, so a drag over a relayed video opens one new range request instead of one per move. On a computer ←/→ move 5 seconds. It works the same for direct, playlist-proxy (HLS) and full proxy playback because all three play in the card's own `<video>`. An embed (iframe) hides it. Until something seekable is loaded, or for a stream of unknown length, it shows `--:--` (or `LIVE`) and is not draggable; a live HLS window is seekable inside the window. The strip is its own touch target above the play/pause layer with `touch-action: none` and pointer capture, so a drag on it never swipes to the next video and a tap on it never counts toward a double-tap いいね. Time formatting and the position math are `formatTime`, `seekInfo`, `seekRatio`, `seekTarget`, `seekBy` and `seekbarState` in `src/feed-logic.js`.
 
 **ブクマ（いいね一覧）**: ♥ (or a double tap) saves the video in `localStorage` (`shorts.bookmarks`: source, id, page URL, title, thumbnail, liked time, and the original `playback` object for the usual ladder), newest first, at most 500 (the oldest is dropped; a full or broken storage trims or is ignored instead of crashing). The ブクマ button at the right of the site bar plays them in the same vertical feed; a video that no longer plays is skipped with a note but stays in the list until you tap ♥ again, and the bottom bar returns to the ranking.
+
+**下部のブクマ入口**: the bottom bar also has a ブクマ button (with the count) next to the period buttons; it opens the same いいね一覧. The header button stays.
+
+**一覧 / ランダム再生**: in the いいね一覧 the bottom bar has ランキングに戻る, 一覧 (newest first, as before) and ランダム再生 (every like from any source, disabled TwiKeep / Twihozon ones included, in a plain uniform shuffle instead of the weighted ranking order; tap it again to reshuffle). Both play in the vertical feed with each video's own source settings (Pornhub's 5-second start, the usual playback ladder). A like that cannot play is skipped, never removed. The choice is saved as `shorts.bookmarkOrder` (a broken value means 一覧). Logic: `orderBookmarkVideos`, `shuffleList`, `bookmarkPlayable` in `src/feed-logic.js`.
+
+**横スワイプでサイト切替**: on the ranking feed, swipe left for the next site and right for the previous one, looping through the sites the header bar offers (disabled or hidden ones are skipped). A swipe only counts when it is at least 60px and clearly more sideways than vertical (`swipeSourceDirection`), so vertical swipes, taps, double-tap いいね and the seek bar are unaffected. The site name shows briefly, and the choice is saved like a header tap. Off in the いいね一覧. On a computer use Shift+← / Shift+→ (plain ←/→ still seek). Logic: `stepSource` in `src/feed-logic.js`.
 
 ## API
 

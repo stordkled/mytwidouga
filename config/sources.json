@@ -15,31 +15,39 @@
   "sources": {
     "twivideo": {
       "hidden": true,
-      "bases": ["https://twivideo.net"]
+      "bases": ["https://twivideo.net"],
+      "startOffsetSec": 0
     },
     "twikeep": {
+      "enabled": false,
       "bases": ["https://www.twikeep.com"],
-      "metric": "downloads"
+      "metric": "downloads",
+      "startOffsetSec": 0
     },
     "85po": {
       "bases": [
         "https://www.85po.com",
         "https://www.85po.net",
         "https://www.85ro.com"
-      ]
+      ],
+      "startOffsetSec": 0
     },
     "pornhub": {
       "bases": [
         "https://www.pornhub.com",
         "https://jp.pornhub.com",
         "https://rt.pornhub.com"
-      ]
+      ],
+      "startOffsetSec": 5
     },
     "tokyomotion": {
-      "bases": ["https://www.tokyomotion.net"]
+      "bases": ["https://www.tokyomotion.net"],
+      "startOffsetSec": 0
     },
     "twihozon": {
-      "bases": ["https://www.twihozon.org"]
+      "enabled": false,
+      "bases": ["https://www.twihozon.org"],
+      "startOffsetSec": 0
     }
   }
 }

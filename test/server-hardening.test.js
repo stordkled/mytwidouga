@@ -1,3 +1,8 @@
+// The switcher assertions below cover all adapters, including the two that
+// the shipped config disables (see disabled-sources.test.js).
+process.env.SOURCE_ENABLED_TWIKEEP = '1';
+process.env.SOURCE_ENABLED_TWIHOZON = '1';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -58,6 +63,8 @@ test('static files are limited to the PWA itself', () => {
     assert.equal(staticPath('/src/main.js?v=8', root), path.join(root, 'src', 'main.js'));
     assert.equal(staticPath('/icons/icon-192.png', root), path.join(root, 'icons', 'icon-192.png'));
     assert.equal(staticPath('/sw.js', root), path.join(root, 'sw.js'));
+    assert.equal(staticPath('/robots.txt', root), path.join(root, 'robots.txt'));
+    assert.equal(staticPath('/sitemap.xml', root), path.join(root, 'sitemap.xml'));
     for (const blocked of [
         '/server.js',
         '/package.json',

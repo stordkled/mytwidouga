@@ -924,18 +924,64 @@ body {
     color: #fff;
 }
 
-/* Periods + 保存数/表示数 + ランダム/ランキング順 must fit a 360px phone. */
+/* Periods + 保存数/表示数 + ランダム/ランキング順 + ブクマ must fit a 360px
+   phone: buttons shrink and long labels end in "…" instead of overflowing. */
 .bottom-nav .nav-btn {
-    padding: 8px 10px;
+    flex: 1 1 auto;
+    padding: 8px 6px;
     min-width: 0;
+    max-width: 50%;
+}
+
+.bottom-nav .nav-btn span {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .nav-btn.order-btn span {
     white-space: nowrap;
 }
 
+.nav-btn.bookmark-nav i,
+.nav-btn.bookmark-random-btn.active i,
+.nav-btn.bookmark-list-btn.active i {
+    color: var(--accent-primary);
+}
+
 .nav-btn.back-to-ranking {
     color: var(--text-primary);
+    flex: 1 1 0;
+}
+
+/* Site name shown briefly after a swipe / Shift+←→ switch. */
+.source-toast {
+    position: fixed;
+    top: calc(var(--source-bar-height) + 56px);
+    left: 50%;
+    z-index: 70;
+    max-width: 80%;
+    padding: 8px 18px;
+    border-radius: var(--radius-full);
+    background: rgba(0, 0, 0, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+    opacity: 0;
+    transform: translate(-50%, -6px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.source-toast.visible {
+    opacity: 1;
+    transform: translate(-50%, 0);
 }
 
 .nav-btn:disabled {

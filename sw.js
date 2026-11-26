@@ -1,4 +1,4 @@
-const CACHE_NAME = 'twivideo-shorts-v12';
+const CACHE_NAME = 'twivideo-shorts-v15';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
@@ -102,6 +102,9 @@ self.addEventListener('fetch', (event) => {
     if (request.headers.has('range') || request.destination === 'video' || request.destination === 'audio') {
         return;
     }
+
+    // A page load stays with the browser so a 401 can open its password prompt.
+    if (request.mode === 'navigate') return;
 
     if (appShell(url)) {
         event.respondWith(networkFirst(request));
