@@ -68,7 +68,21 @@ function makeCard(index) {
 
 function client(videos, config, fetch, currentSource = 'pornhub') {
     const cards = videos.map((_, index) => makeCard(index));
-    const feed = { querySelectorAll: () => cards };
+    // The client registers feed-level pointer listeners (horizontal source
+    // swipe); keep them in memory so the playback paths below still run.
+    const feedListeners = new Map();
+    const feed = {
+        querySelectorAll: () => cards,
+        addEventListener(type, fn) {
+            if (!feedListeners.has(type)) feedListeners.set(type, []);
+            feedListeners.get(type).push(fn);
+        },
+        removeEventListener(type, fn) {
+            const list = feedListeners.get(type) || [];
+            const at = list.indexOf(fn);
+            if (at >= 0) list.splice(at, 1);
+        },
+    };
     const context = vm.createContext({
         window: { FeedLogic: Logic, addEventListener() {} },
         document: {
