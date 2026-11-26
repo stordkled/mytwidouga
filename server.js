@@ -32,6 +32,8 @@ const MIME = {
     '.ico': 'image/x-icon',
     '.svg': 'image/svg+xml',
     '.webmanifest': 'application/manifest+json',
+    '.txt': 'text/plain; charset=utf-8',
+    '.xml': 'application/xml; charset=utf-8',
 };
 
 function sendJson(res, status, body) {

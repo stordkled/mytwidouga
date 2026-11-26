@@ -63,6 +63,8 @@ test('static files are limited to the PWA itself', () => {
     assert.equal(staticPath('/src/main.js?v=8', root), path.join(root, 'src', 'main.js'));
     assert.equal(staticPath('/icons/icon-192.png', root), path.join(root, 'icons', 'icon-192.png'));
     assert.equal(staticPath('/sw.js', root), path.join(root, 'sw.js'));
+    assert.equal(staticPath('/robots.txt', root), path.join(root, 'robots.txt'));
+    assert.equal(staticPath('/sitemap.xml', root), path.join(root, 'sitemap.xml'));
     for (const blocked of [
         '/server.js',
         '/package.json',
